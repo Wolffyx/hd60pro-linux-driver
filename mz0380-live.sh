@@ -63,6 +63,21 @@ do_unload() {
 	if [ -d /sys/module/mz0380 ]; then
 		scripts/mz0380-spawns.sh commit 2>/dev/null || true
 	fi
+	# M246: with enable_audio=1 the desktop audio server (WirePlumber) opens
+	# the new ALSA card's control device the moment it appears, and an open
+	# ALSA file pins the module - rmmod then refuses with "in use" for as
+	# long as the session runs. Unbinding first takes the driver's normal
+	# removal path, which disconnects the card; the server sees that, closes
+	# its handle, and the reference is gone before rmmod asks.
+	if [ "$(cat /sys/module/mz0380/refcnt 2>/dev/null || echo 0)" -gt 0 ]; then
+		local dev
+		for dev in /sys/bus/pci/drivers/mz0380/0000:*; do
+			[ -e "$dev" ] || continue
+			echo "unbinding $(basename "$dev") to release open handles (refcnt $(cat /sys/module/mz0380/refcnt))"
+			echo "$(basename "$dev")" > /sys/bus/pci/drivers/mz0380/unbind
+		done
+		sleep 1
+	fi
 	if rmmod mz0380 2>/dev/null; then
 		echo "module unloaded"
 		scripts/mz0380-spawns.sh unloaded 2>/dev/null || true

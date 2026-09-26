@@ -15281,3 +15281,139 @@ branch removed; `MODULE_AUTHOR` corrected; board tables `const`.
   locked, agreeing with the input status. PASS.** Spawn tally 2.
 
 Still untested: suspend/resume and `.shutdown`.
+
+## M246 (2026-09-26): HDMI audio is window 3 - op 0x03, four 4 KiB slots, EVENT[19:16] + token 0x4c
+
+The data path the Windows traces could not show (collect-2026-08-19,
+WHAT-LINUX-STILL-NEEDS item 3), read from the two binaries instead.
+
+**Windows registers it.** e60MZ0380 v195 at `0x14027b05f` builds, for channel
+0..7 in a loop:
+
+    {0x800, 0x03, ch, 0x1000, {hi, lo} x 4}      slots = [dev+0xc8] + k * 0x1000
+
+- op `0x03`, a **4 KiB** slot size, four consecutive slots per channel cut from
+one common buffer. Every video registration is megabytes; this one is audio.
+4096 bytes is exactly 256 frames x 4 periods x 2 ch x 16 bit, which is both what
+our SET_AIC already asks for and the card's own `capture_app_infinite` default
+(`-F 256 -B 4`). ep.ko maps op 0x03 to `channels[ch] + 0x88` - window 3 (M23's
+opcode table). This driver had never sent it; M32 sent it once, pointed at a
+video buffer, in a session where the pipeline produced nothing at all, so that
+said nothing about audio.
+
+**The card reports it.** ep.ko `store_channel_done` (0xdc8) takes a descriptor
+whose word 5 selects the audio branch:
+
+    audio:  bar0[0x4c] nibble[ch] = desc[4] - 1          (slot 0..3)
+    EVENT:  vic_int_mode != 0            -> BIT(16 + ch)
+            vic_int_mode == 0, aic_int_mode == 1 -> BIT(15 + desc[4])  = bits 16..19
+
+We send vic_int_mode 0 and aic_int_mode 1 (what Windows sends), so each filled
+slot should raise its own bit in 16..19. `reg.h` already labelled 0x4c "payload
+for EVENT[23:16] events". The ISR ACKed those bits and nothing ever read them.
+
+**Implemented behind `enable_audio=1` (load time, default off):** four slots at
+their own 4 GiB-aligned IOVAs after every video window (index 16..19), 64 KiB
+mapped and poisoned per slot; op 0x03 sent wherever the encoded window is
+(re)registered; EVENT[23:16] + 0x4c snapshotted pre-ACK like a video frame;
+each slot's written extent measured against the poison, at most 4 KiB handed to
+a real ALSA capture device (S16_LE, the SET_AIC channel count and rate), then
+re-poisoned. `/proc/mz0380-state` prints an `audio :` line with every counter.
+
+**Predictions, before any hardware run** (`scripts/mz0380-m246-audio-test.sh`,
+one spawn): audio events > 0 at about 48000 / 1024 = 47 per second, max extent
+4096, no overrun, no empty slots, and a WAV whose content follows the source.
+Events at 0 would mean the window is not the whole story; empty slots with
+events would mean the target is right in principle but offset. Unverified.
+
+### M246 first run: zero audio events - and why (SET_AIC bytes 4 and 5 were wrong)
+
+    audio : 0 events, 0 slots, 0 bytes ... ; IOMMU faults: none
+    raw frames: 600 delivered; arecord: read error: Input/output error
+
+The window and the event plumbing were not reached at all, because the card
+never produced audio. Its `audio_capture_mgr` (on-card, ~1.9 KB of code,
+disassembled into `re-dump/acm.ann.txt`) polls `/sys/vpl_pciep/audio_ctrl`,
+which ep.ko notifies for op 0x06 AND for op 0x2a (the SET_AIC handler at 0x17cc
+notifies epint and then `audio_ctrl` - M125 had only seen the first). On a
+SET_AIC it launches
+
+    ./capture_app_infinite -D -P 5 -d 0 -R <freq> -F <frames> -B <periods>
+
+only when it was started with `-P 5` (rc.local does), **cmd+4 == 0**, cmd+5 / 2
+>= 1 (it compares cmd+5 against 8 for the 8-channel app) and on == 1. So cmd+4
+is an audio index and **cmd+5 is the channel count**. video_capture_mgr's printf
+calls them "channel_num" and "mono", which is where M33's layout came from; the
+Windows driver agrees with the audio manager, not the label - its dword at
+0x14028c10e is `index | chs << 8 | 16 << 16`. We sent cmd+4 = 2, cmd+5 = 0, so the
+PCM capture program has never run on this card.
+
+Fixed for the audio build only: with the audio window allocated, SET_AIC word 0
+is `0 | chs << 8 | bits << 16`. A video-only load keeps the legacy bytes it was
+validated with - the launched app is a daemon, and each SET_AIC starts another
+one on the card, which is exactly the kind of change the wedge budget argues
+against making silently. Second run pending.
+
+### M246 second run: THE CARD DELIVERS HDMI AUDIO
+
+    SET_AIC(on=1, 2 ch, 16 bit, 48000 Hz, 256 frames x 4 periods,
+            audio (index 0, chs in cmd+5) layout word0=00100200) ret=0
+    audio : 584 events, 1168 slots, 2392064 bytes, 584 empty, 0 overrun,
+            0 bad token, max extent 4096, slots seen 0xf,
+            last event 00080000 token a5a5a5a3
+    raw frames: 600 delivered; IOMMU faults: none
+
+584 x 4096 bytes = 12.46 s of 48 kHz stereo 16-bit, against a ~12 s video run:
+about 47 completions a second, one full 4 KiB slot each, all four slots in use.
+The last event, bit 19, is slot 3, and so is the token's nibble - both
+completion signals agree with the ep.ko decode. Video was unaffected by the
+corrected SET_AIC. (The run before this one never reached the card: WirePlumber
+held the new ALSA card's control device, which pins the module, so the reload
+failed. `mz0380-live.sh unload` now unbinds first.)
+
+Two defects of mine, both visible in those numbers:
+
+- 1168 slots for 584 events, one empty per event: the consume loop re-read
+  `audio_last_slot` while consume_slot() was moving it, walked round and took
+  the slot it had just re-poisoned. Fixed (start slot taken once).
+- The capture got nothing (`arecord: read error: Input/output error`, an
+  empty WAV) although 2.4 MB was consumed during its window. Not understood
+  from the code; the push now counts bytes delivered, periods, refusals and
+  the reason for them, and the arrival window. Third run pending.
+
+### M246 third run, and two zero-spawn checks: transport PROVEN, content silent
+
+Third run: `589 events, 589 slots, 2412544 bytes, 0 empty` - the double
+consume is gone. ALSA still `0 bytes delivered, 589 refused (why 0x6)`: every
+push found the capture closed or not started. Not a driver fault: a fresh load
+spends ~20 s before SET_AIC (spawn, settle), the card starts its capture app only
+then, and arecord - started on a fixed 2 s delay - hit ALSA's 10 s no-period
+timeout and exited before the first slot existed. The test now waits for the
+first audio event before recording.
+
+With that run's module still loaded, its persistent pipeline kept the audio
+flowing (338 s, ~47 slots/s, no video attached), so the ALSA side could be tested
+without another spawn:
+
+| check | result |
+|---|---|
+| arecord alone, 3 s | 577536 bytes delivered, 24 periods - exactly 3 s of 48 kHz stereo |
+| arecord while re-attaching video (persistent pipeline, 0 spawns) | 770048 bytes delivered - 4 s - video at 50 fps throughout |
+| content of both WAVs | **100% zero samples**, no poison |
+
+So the path is proven end to end: SET_AIC launches the card's capture app,
+op 0x03's window receives 4 KiB periods at the right rate, EVENT[19:16] + 0x4c
+report them, and ALSA delivers them. What arrives is digital silence. Not yet
+separated:
+
+- the source sends no HDMI audio (cameras often embed none, or only when a
+  setting is on);
+- **several capture apps are running on the card.** Every SET_AIC starts
+  another `capture_app_infinite` daemon and STOP does not end it -
+  audio_capture_mgr answers op 0x07 with "unknow command" - so runs 2-4 left
+  three competing for I2S 0. A mains-off cold boot clears them;
+- the receiver's audio path. Our init already carries hdcapm's RxAudioInit
+  register for register, so this is the least likely.
+
+Next: cold boot, a source known to embed audio (a PC or console HDMI output),
+one run of `scripts/mz0380-m246-audio-test.sh`.

@@ -279,6 +279,112 @@ err:
 }
 
 /*
+ * M246: the audio window's four slots, each at its own 4 GiB-aligned IOVA after
+ * every video window, with MZ0380_AUDIO_SLOT_MAP bytes mapped and poisoned so
+ * the extent the card writes is measured rather than assumed.
+ */
+void mz0380_audio_bufs_free(struct mz0380_dev *dev)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(&dev->pci->dev);
+	unsigned int i;
+
+	for (i = 0; i < MZ0380_AUDIO_NR_SLOTS; i++) {
+		struct mz0380_audio_buf *b = &dev->audio_bufs[i];
+
+		if (!b->pages)
+			continue;
+		if (b->dma && domain)
+			iommu_unmap(domain, b->dma, MZ0380_AUDIO_SLOT_MAP);
+		__free_pages(b->pages, get_order(MZ0380_AUDIO_SLOT_MAP));
+		b->pages = NULL;
+		b->va = NULL;
+		b->dma = 0;
+	}
+	dev->audio_capable = false;
+}
+
+static int mz0380_audio_bufs_alloc_iova(struct mz0380_dev *dev)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(&dev->pci->dev);
+	unsigned int order = get_order(MZ0380_AUDIO_SLOT_MAP);
+	unsigned int i;
+	int ret;
+
+	if (!mz0380_dma_iova_remap || !domain)
+		return -ENODEV;
+
+	for (i = 0; i < MZ0380_AUDIO_NR_SLOTS; i++) {
+		struct mz0380_audio_buf *b = &dev->audio_bufs[i];
+		dma_addr_t iova = mz0380_dma_iova_base +
+			((u64)(MZ0380_AUDIO_IOVA_INDEX + i) << 32);
+		phys_addr_t phys;
+
+		b->pages = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+		if (!b->pages) {
+			ret = -ENOMEM;
+			goto err;
+		}
+		b->va = page_address(b->pages);
+		phys = page_to_phys(b->pages);
+
+		if (iommu_iova_to_phys(domain, iova)) {
+			pr_err("%s: audio IOVA 0x%llx is already mapped\n",
+			       dev->name, (unsigned long long)iova);
+			ret = -EBUSY;
+			goto err;
+		}
+		ret = iommu_map(domain, iova, phys, MZ0380_AUDIO_SLOT_MAP,
+				IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
+		if (ret) {
+			pr_err("%s: audio iommu_map(0x%llx) failed (%d)\n",
+			       dev->name, (unsigned long long)iova, ret);
+			goto err;
+		}
+		b->dma = iova;
+		memset(b->va, MZ0380_AUDIO_POISON_BYTE, MZ0380_AUDIO_SLOT_MAP);
+	}
+	wmb();	/* poison visible before the card can be told the address */
+	dev->audio_capable = true;
+	return 0;
+
+err:
+	mz0380_audio_bufs_free(dev);
+	return ret;
+}
+
+/*
+ * M246: op 0x03, exactly as Windows builds it - channel, the 4 KiB slot size,
+ * then four {hi, lo} targets. Sent wherever the encoded window is (re)registered
+ * so the two can never disagree about a spawn boundary.
+ */
+static int mz0380_audio_program_bufs(struct mz0380_dev *dev)
+{
+	u32 params[2 + 2 * MZ0380_AUDIO_NR_SLOTS] = { 0 };
+	unsigned int i;
+	int ret;
+
+	params[0] = MZ0380_STREAM_VIDEO_CHANNEL;
+	params[1] = MZ0380_AUDIO_SLOT_SIZE;
+	for (i = 0; i < MZ0380_AUDIO_NR_SLOTS; i++) {
+		struct mz0380_audio_buf *b = &dev->audio_bufs[i];
+
+		if (!b->va || !b->dma)
+			return -ENODEV;
+		memset(b->va, MZ0380_AUDIO_POISON_BYTE, MZ0380_AUDIO_SLOT_MAP);
+		params[2 + 2 * i] = upper_32_bits(b->dma);
+		params[2 + 2 * i + 1] = lower_32_bits(b->dma);
+	}
+	wmb();	/* re-poisoned slots visible before op 0x03 hands them over */
+
+	ret = mz0380_send_command(dev, MZ0380_CMD_SET_BUF_3, params,
+				  ARRAY_SIZE(params), NULL, 2000);
+	pr_info("%s: audio window registered (op 0x03, 4 x 0x%x at IOVA 0x%llx..) ret=%d\n",
+		dev->name, MZ0380_AUDIO_SLOT_SIZE,
+		(unsigned long long)dev->audio_bufs[0].dma, ret);
+	return ret;
+}
+
+/*
  * M26. Put buffer i at IOVA (dma_iova_base + (i << 32)) so its low 32 bits are
  * zero, because that is the only half of the host target the card's outbound
  * window actually latches (M25, proven on hw: host_addr == (word0 << 32) +
@@ -429,6 +535,14 @@ int mz0380_h264_program_bufs(struct mz0380_dev *dev)
 				  ARRAY_SIZE(params), NULL, 2000);
 	pr_info("%s: H.264 probe registered dedicated window1 ring (op 0x04, size=0x%x) ret=%d\n",
 		dev->name, MZ0380_H264_SET_BUF_SIZE, ret);
+	/* M246: audio rides along; its failure must not cost the video. */
+	if (!ret && dev->audio_capable) {
+		int aret = mz0380_audio_program_bufs(dev);
+
+		if (aret)
+			pr_warn("%s: audio window registration failed (%d); video is unaffected\n",
+				dev->name, aret);
+	}
 	return ret;
 }
 
@@ -796,6 +910,7 @@ int mz0380_irq_request(struct mz0380_dev *dev)
 		dev->video_sequence = 0;
 	dev->frame_poison_active = false;
 	INIT_WORK(&dev->drain_work, mz0380_drain_work_fn);
+	INIT_WORK(&dev->audio_work, mz0380_audio_work_fn);
 	/*
 	 * M245: the drain copies up to 3 MB per frame. On the shared system
 	 * workqueue that competes with - and delays - unrelated work, and
@@ -949,6 +1064,23 @@ int mz0380_dma_setup(struct mz0380_dev *dev)
 		}
 	}
 
+	/*
+	 * M246: the audio window, when asked for. Optional in the same way the
+	 * raw banks are: failing to get it costs audio, never the video node.
+	 */
+	if (mz0380_enable_audio && mz0380_h264_probe) {
+		ret = mz0380_audio_bufs_alloc_iova(dev);
+		if (ret)
+			pr_warn("%s: audio window unavailable (%d); ALSA capture will not be offered\n",
+				dev->name, ret);
+		else
+			pr_info("%s: audio window ready: %u x 0x%x slots from IOVA 0x%llx\n",
+				dev->name, MZ0380_AUDIO_NR_SLOTS,
+				MZ0380_AUDIO_SLOT_SIZE,
+				(unsigned long long)dev->audio_bufs[0].dma);
+		ret = 0;
+	}
+
 	pr_info("%s: %u stream buffers x %u KiB (buf0 @ %pad)\n",
 		dev->name, MZ0380_STREAM_NR_BUFS,
 		MZ0380_STREAM_BUF_SIZE >> 10, &dev->stream_bufs[0].dma);
@@ -989,6 +1121,133 @@ void mz0380_enc_stat_ack(struct mz0380_dev *dev)
 }
 
 /*
+ * M246: audio. The snapshot is taken under the same pre-ACK rule as a video
+ * frame - once EVENT is cleared the card may overwrite 0x4c - and the slot is
+ * consumed in process context on the drain workqueue.
+ */
+static void mz0380_audio_event_snapshot(struct mz0380_dev *dev, u32 event)
+{
+	u32 token = mz_mmio_read(dev, MZ0380_MB_EVT_PAYLOAD3);
+	unsigned long flags;
+	u16 next;
+
+	dma_rmb();
+	spin_lock_irqsave(&dev->frame_event_lock, flags);
+	if (!dev->audio_events)
+		dev->audio_first_ns = ktime_get_ns();
+	dev->audio_last_ns = ktime_get_ns();
+	dev->audio_events++;
+	next = (dev->audio_fifo_head + 1) % MZ0380_AUDIO_EVENT_FIFO_SIZE;
+	if (next == dev->audio_fifo_tail) {
+		dev->audio_fifo_drops++;
+	} else {
+		dev->audio_fifo[dev->audio_fifo_head].event = event;
+		dev->audio_fifo[dev->audio_fifo_head].token = token;
+		dev->audio_fifo_head = next;
+	}
+	spin_unlock_irqrestore(&dev->frame_event_lock, flags);
+	queue_work(dev->drain_wq, &dev->audio_work);
+}
+
+/*
+ * Measure how far into the slot the card wrote - from the end, against the
+ * poison, like the video extent - hand at most one slot of it to ALSA, and
+ * re-poison what was written. The measurement is the point on first contact:
+ * nothing but the op 0x03 size word says a completion carries 4096 bytes.
+ */
+static void mz0380_audio_consume_slot(struct mz0380_dev *dev, u32 slot)
+{
+	struct mz0380_audio_buf *b = &dev->audio_bufs[slot];
+	const u32 *w = b->va;
+	const u32 poison = 0x01010101u * MZ0380_AUDIO_POISON_BYTE;
+	size_t i, extent = 0, len;
+
+	dev->audio_slots++;
+	dev->audio_slots_seen |= BIT(slot);
+	dev->audio_last_slot = slot;
+
+	dma_rmb();
+	for (i = MZ0380_AUDIO_SLOT_MAP / sizeof(*w); i; i--) {
+		if (READ_ONCE(w[i - 1]) != poison) {
+			extent = i * sizeof(*w);
+			break;
+		}
+	}
+	if (!extent) {
+		dev->audio_empty++;
+		return;
+	}
+	if (extent > dev->audio_max_extent)
+		dev->audio_max_extent = extent;
+	if (extent > MZ0380_AUDIO_SLOT_SIZE)
+		dev->audio_overrun++;
+
+	len = min_t(size_t, extent, MZ0380_AUDIO_SLOT_SIZE);
+	mz0380_audio_push(dev, b->va, len);
+	dev->audio_bytes += len;
+
+	memset(b->va, MZ0380_AUDIO_POISON_BYTE, extent);
+	dma_wmb();
+}
+
+void mz0380_audio_work_fn(struct work_struct *work)
+{
+	struct mz0380_dev *dev = container_of(work, struct mz0380_dev,
+					      audio_work);
+
+	for (;;) {
+		unsigned long flags;
+		u32 event, token, mask, slot, start, k;
+
+		spin_lock_irqsave(&dev->frame_event_lock, flags);
+		if (dev->audio_fifo_tail == dev->audio_fifo_head) {
+			spin_unlock_irqrestore(&dev->frame_event_lock, flags);
+			return;
+		}
+		event = dev->audio_fifo[dev->audio_fifo_tail].event;
+		token = dev->audio_fifo[dev->audio_fifo_tail].token;
+		dev->audio_fifo_tail = (dev->audio_fifo_tail + 1) %
+				       MZ0380_AUDIO_EVENT_FIFO_SIZE;
+		spin_unlock_irqrestore(&dev->frame_event_lock, flags);
+
+		dev->audio_last_event = event;
+		dev->audio_last_token = token;
+
+		/*
+		 * With aic_int_mode=1 each completed slot has its own bit,
+		 * BIT(16 + slot), and bits accumulated while the card had no
+		 * credit arrive together. Otherwise the one bit is BIT(16 + ch)
+		 * and the slot is the token's channel-0 nibble.
+		 */
+		mask = mz0380_aic_int_mode == 1 ?
+		       (event >> 16) & (BIT(MZ0380_AUDIO_NR_SLOTS) - 1) : 0;
+		if (!mask) {
+			slot = token & 0xf;
+			if (slot >= MZ0380_AUDIO_NR_SLOTS) {
+				dev->audio_bad_token++;
+				continue;
+			}
+			mask = BIT(slot);
+		}
+
+		/*
+		 * Oldest first: the card fills the slots in rotation. The
+		 * starting point is taken once - consume_slot() moves
+		 * audio_last_slot, and reading it inside the loop walked
+		 * round to the slot just consumed and consumed it again
+		 * (the first hardware run: 1168 slots for 584 events, every
+		 * second one empty).
+		 */
+		start = dev->audio_last_slot;
+		for (k = 1; k <= MZ0380_AUDIO_NR_SLOTS; k++) {
+			slot = (start + k) % MZ0380_AUDIO_NR_SLOTS;
+			if (mask & BIT(slot))
+				mz0380_audio_consume_slot(dev, slot);
+		}
+	}
+}
+
+/*
  * Snapshot the frame mailbox while it still belongs to @event.  The endpoint
  * event channel is a one-shot ping-pong: ACK re-arms it and TOKEN/PAYLOAD may
  * then be overwritten immediately.  This hook is called centrally by
@@ -1006,6 +1265,15 @@ void mz0380_handle_event_snapshot(struct mz0380_dev *dev, u32 event)
 	u16 next;
 	bool dropped = false;
 	bool ack_now = false;
+
+	/*
+	 * M246: audio completions carry their own EVENT bits (16..23) and slot
+	 * token (0x4c). Before this nothing looked at either, so every audio
+	 * event the card raised was ACKed and discarded.
+	 */
+	if ((event & MZ0380_AUDIO_EVENT_MASK) && dev->audio_capable &&
+	    READ_ONCE(dev->frame_events_accepting))
+		mz0380_audio_event_snapshot(dev, event);
 
 	if (!(event & MZ0380_VIDEO_EVENT_BIT) ||
 	    !READ_ONCE(dev->frame_events_accepting))
@@ -1116,6 +1384,25 @@ void mz0380_frame_events_start(struct mz0380_dev *dev)
 	 */
 	dev->raw_incomplete_tail = 0;
 	dev->raw_incomplete_chroma = 0;
+	/* M246: the audio counters are per session too. */
+	dev->audio_fifo_head = 0;
+	dev->audio_fifo_tail = 0;
+	dev->audio_last_slot = MZ0380_AUDIO_NR_SLOTS - 1;
+	dev->audio_events = 0;
+	dev->audio_slots = 0;
+	dev->audio_bytes = 0;
+	dev->audio_empty = 0;
+	dev->audio_overrun = 0;
+	dev->audio_bad_token = 0;
+	dev->audio_fifo_drops = 0;
+	dev->audio_max_extent = 0;
+	dev->audio_slots_seen = 0;
+	dev->audio_first_ns = 0;
+	dev->audio_last_ns = 0;
+	dev->audio_alsa_bytes = 0;
+	dev->audio_alsa_periods = 0;
+	dev->audio_alsa_bails = 0;
+	dev->audio_alsa_bail_why = 0;
 	for (i = 0; i < MZ0380_RAW_PROBE_NR_BUFS; i++) {
 		dev->raw_probe_bufs[i].last_extent = 0;
 		dev->raw_probe_bufs[i].completions = 0;
@@ -1142,6 +1429,7 @@ void mz0380_dma_flush_events(struct mz0380_dev *dev)
 
 	/* Process-context API: synchronize before vb2 buffers or DMA memory go away. */
 	cancel_work_sync(&dev->drain_work);
+	cancel_work_sync(&dev->audio_work);
 
 	spin_lock_irqsave(&dev->frame_event_lock, flags);
 	while (dev->frame_event_tail != dev->frame_event_head) {

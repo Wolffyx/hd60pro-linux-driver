@@ -583,11 +583,33 @@ vic_done:
 	 */
 	if (mz0380_aic_on && (mz0380_aic_every_frame || !dev->aic_armed)) {
 		bool was_armed = dev->aic_armed;
+		/*
+		 * M246: cmd+4 and cmd+5 are NOT channel_num and mono.
+		 *
+		 * That reading came from video_capture_mgr's printf labels. The
+		 * card's audio_capture_mgr, which is what turns SET_AIC into
+		 * audio, treats cmd+4 as an audio INDEX and cmd+5 as the CHANNEL
+		 * COUNT: it launches ./capture_app_infinite only when cmd+4 == 0
+		 * and cmd+5 / 2 >= 1 (and on == 1). Windows builds the same word
+		 * as index | chs << 8 | 16 << 16 (e60MZ0380 v195 0x14028c10e). We
+		 * sent cmd+4 = 2, cmd+5 = 0, so the card's PCM capture program
+		 * never started and no audio completion could ever arrive.
+		 *
+		 * Only the audio build uses the corrected layout. The capture app
+		 * it launches is a daemon, and every SET_AIC starts another one on
+		 * the card - fine when that is the point, and not a change a
+		 * video-only load should make to a start sequence validated
+		 * without it.
+		 */
+		u32 aic_word0 = dev->audio_capable ?
+			(0u |						/* cmd+4 index    */
+			 (mz0380_aic_channels & 0xff) << 8 |		/* cmd+5 channels */
+			 (u32)(mz0380_aic_bits & 0xffff) << 16) :	/* cmd+6 bits     */
+			((mz0380_aic_channels & 0xff) |			/* legacy layout  */
+			 ((u32)(mz0380_aic_channels == 1 ? 1 : 0) << 8) |
+			 ((u32)(mz0380_aic_bits & 0xffff) << 16));
 		u32 aic[4] = {
-			/* cmd+4 channel_num | cmd+5 mono<<8 | cmd+6 bits<<16 */
-			(mz0380_aic_channels & 0xff) |
-			((u32)(mz0380_aic_channels == 1 ? 1 : 0) << 8) |
-			((u32)(mz0380_aic_bits & 0xffff) << 16),
+			aic_word0,
 			mz0380_aic_freq,			/* cmd+8  freq  */
 			(mz0380_aic_period_frames & 0xffff) |	/* cmd+12       */
 			((u32)(mz0380_aic_periods & 0xffff) << 16), /* cmd+14   */
@@ -597,10 +619,13 @@ vic_done:
 
 		ret = mz0380_send_command(dev, MZ0380_CMD_SET_AIC_PARAMS, aic,
 					  ARRAY_SIZE(aic), NULL, 2000);
-		pr_info("%s: stream start: SET_AIC(on=1, %u ch, %u bit, %u Hz, %u frames x %u periods) ret=%d\n",
+		pr_info("%s: stream start: SET_AIC(on=1, %u ch, %u bit, %u Hz, %u frames x %u periods, %s layout word0=%08x) ret=%d\n",
 			dev->name, mz0380_aic_channels, mz0380_aic_bits,
 			mz0380_aic_freq, mz0380_aic_period_frames,
-			mz0380_aic_periods, ret);
+			mz0380_aic_periods,
+			dev->audio_capable ? "audio (index 0, chs in cmd+5)" :
+					     "legacy video-only",
+			aic_word0, ret);
 		if (!ret) {
 			dev->aic_armed = true;
 			aic_newly_armed = !was_armed;

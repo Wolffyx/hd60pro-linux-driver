@@ -465,6 +465,31 @@
 /* First-cut streaming geometry (video channel 0). Tunable once frames flow. */
 #define MZ0380_STREAM_VIDEO_CHANNEL     0
 #define MZ0380_STREAM_NR_BUFS           4     /* 4 phys pairs per SET_BUF cmd  */
+
+/*
+ * M246: the audio window.
+ *
+ * Windows registers it with op 0x03 (ep.ko: channels[ch] + 0x88, window 3)
+ * as four 4 KiB slots per channel - e60MZ0380 v195 at 0x14027b05f builds
+ * {0x800, 3, ch, 0x1000, 4 x {hi, lo}} for ch 0..7 from one common buffer.
+ * 4096 bytes is exactly what our SET_AIC asks for: 256 frames x 4 periods of
+ * 2-channel 16-bit PCM, the card's own capture_app default ("-F 256 -B 4").
+ *
+ * Completion (ep.ko store_channel_done, audio branch): BAR0+0x4c nibble[ch] =
+ * slot index (bufidx - 1), and EVENT gains BIT(15 + bufidx) - bits 16..19 -
+ * when aic_int_mode is 1 (what Windows sends), or BIT(16 + ch) otherwise.
+ *
+ * Each slot gets its own 4 GiB-aligned IOVA like every other window, because
+ * the card only latches the high half of a target (M25/M26). More than a slot
+ * is mapped and poisoned so a write past 4 KiB is measured instead of faulting.
+ */
+#define MZ0380_AUDIO_NR_SLOTS           4
+#define MZ0380_AUDIO_SLOT_SIZE          0x1000  /* what op 0x03 declares        */
+#define MZ0380_AUDIO_SLOT_MAP           0x10000 /* mapped + poisoned per slot   */
+#define MZ0380_AUDIO_POISON_BYTE        0xc3
+#define MZ0380_AUDIO_IOVA_INDEX         16      /* after stream/H.264/raw banks */
+#define MZ0380_AUDIO_EVENT_MASK         GENMASK(23, 16)
+#define MZ0380_AUDIO_EVENT_FIFO_SIZE    32
 /*
  * M29: 512 KiB was too small - the card streamed straight past the end of the
  * buffer and the overrun was what produced every IOMMU fault from M26 on (the

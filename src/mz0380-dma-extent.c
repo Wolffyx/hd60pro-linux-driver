@@ -846,6 +846,7 @@ void mz0380_dma_teardown(struct mz0380_dev *dev)
 	mz0380_raw_probe_bufs_free(dev);
 	mz0380_h264_bufs_free(dev);
 	mz0380_stream_bufs_free(dev);
+	mz0380_audio_bufs_free(dev);
 }
 
 /*

@@ -126,6 +126,37 @@ void mz0380_video_state_dump(struct seq_file *m, struct mz0380_dev *dev)
 				   (unsigned long long)dev->raw_multi_landed);
 		}
 		/*
+		 * M246: the audio window. events counts EVENT words with any
+		 * audio bit; slots/bytes what was consumed; empty a completion
+		 * whose slot was still poison; overrun a write past 4 KiB; the
+		 * extent is the most any one completion wrote.
+		 */
+		if (dev->audio_capable) {
+			seq_printf(m, "  audio      : %llu events, %llu slots, %llu bytes, %llu empty, %llu overrun, %llu bad token, %llu fifo drops, max extent %u, slots seen 0x%x, last event %08x token %08x (M246)\n",
+				   (unsigned long long)dev->audio_events,
+				   (unsigned long long)dev->audio_slots,
+				   (unsigned long long)dev->audio_bytes,
+				   (unsigned long long)dev->audio_empty,
+				   (unsigned long long)dev->audio_overrun,
+				   (unsigned long long)dev->audio_bad_token,
+				   (unsigned long long)dev->audio_fifo_drops,
+				   dev->audio_max_extent, dev->audio_slots_seen,
+				   dev->audio_last_event, dev->audio_last_token);
+			seq_printf(m, "  audio alsa : %llu bytes delivered, %llu periods, %llu pushes refused (why 0x%x: 1 no ring, 2 not open, 4 not running, 8 no sizes, 16 no buffer); audio for %llu ms (M246)\n",
+				   (unsigned long long)dev->audio_alsa_bytes,
+				   (unsigned long long)dev->audio_alsa_periods,
+				   (unsigned long long)dev->audio_alsa_bails,
+				   dev->audio_alsa_bail_why,
+				   (unsigned long long)div_u64(dev->audio_last_ns -
+						dev->audio_first_ns, NSEC_PER_MSEC));
+			seq_printf(m, "  audio pcm  : %u opens, %u prepares, %u starts, %u stops, %u closes; refused %llu while closed, %llu while open but not started (M246)\n",
+				   dev->audio_alsa_opens, dev->audio_alsa_prepares,
+				   dev->audio_alsa_starts, dev->audio_alsa_stops,
+				   dev->audio_alsa_closes,
+				   (unsigned long long)dev->audio_alsa_bail_closed,
+				   (unsigned long long)dev->audio_alsa_bail_idle);
+		}
+		/*
 		 * Labelled for what it is. "no signal : inactive" was read by
 		 * the operator as the driver reporting no HDMI source, when it
 		 * means the opposite - the NO SIGNAL placeholder is not being

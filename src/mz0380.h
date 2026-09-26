@@ -433,6 +433,56 @@ struct mz0380_dev {
 	bool deliver_raw;
 	/* M241: which raw layout S_FMT selected - I420, YV12 or NV12. */
 	u32 raw_fourcc;
+	/*
+	 * M246: the audio window - four 4 KiB slots registered with op 0x03 -
+	 * and what arrived in it. Allocated only with enable_audio=1.
+	 */
+	struct mz0380_audio_buf {
+		void *va;
+		dma_addr_t dma;
+		struct page *pages;
+	} audio_bufs[MZ0380_AUDIO_NR_SLOTS];
+	bool audio_capable;
+	struct work_struct audio_work;
+	struct {
+		u32 event;
+		u32 token;
+	} audio_fifo[MZ0380_AUDIO_EVENT_FIFO_SIZE];
+	u16 audio_fifo_head;
+	u16 audio_fifo_tail;
+	u32 audio_last_slot;
+	u64 audio_events;	/* EVENT words carrying any audio bit      */
+	u64 audio_slots;	/* slots consumed                           */
+	u64 audio_bytes;	/* PCM bytes handed to ALSA or dropped      */
+	u64 audio_empty;	/* slot reported done but still all poison  */
+	u64 audio_overrun;	/* card wrote past MZ0380_AUDIO_SLOT_SIZE   */
+	u64 audio_bad_token;	/* token nibble named no slot               */
+	u64 audio_fifo_drops;
+	u32 audio_max_extent;
+	u32 audio_last_event;
+	u32 audio_last_token;
+	u8 audio_slots_seen;
+	/*
+	 * M246: the ALSA side of it. The first run consumed 2.4 MB while the
+	 * capture received nothing, so each push now says whether it delivered
+	 * and, if not, which precondition stopped it (bail_why is a bitmask:
+	 * 1 no ring, 2 no substream, 4 not running, 8 no buffer sizes,
+	 * 16 no runtime buffer), and when audio arrived.
+	 */
+	u64 audio_first_ns;
+	u64 audio_last_ns;
+	u64 audio_alsa_bytes;
+	u64 audio_alsa_periods;
+	u64 audio_alsa_bails;
+	u32 audio_alsa_bail_why;
+	/* Callback counts, and the refusals split by reason. */
+	u32 audio_alsa_opens;
+	u32 audio_alsa_prepares;
+	u32 audio_alsa_starts;
+	u32 audio_alsa_stops;
+	u32 audio_alsa_closes;
+	u64 audio_alsa_bail_closed;	/* no substream open        */
+	u64 audio_alsa_bail_idle;	/* open, not triggered      */
 	/* M217: raw delivery to V4L2. */
 	u64 raw_probe_stub_frames;
 	u64 raw_dup_token;
@@ -858,9 +908,12 @@ int mz0380_i2cbb_scan(struct mz0380_dev *dev, u8 sda, u8 scl);	/* M51 */
 #if IS_ENABLED(CONFIG_SND)
 int mz0380_audio_register(struct mz0380_dev *dev);
 void mz0380_audio_unregister(struct mz0380_dev *dev);
+void mz0380_audio_push(struct mz0380_dev *dev, const void *data, size_t len);
 #else
 static inline int mz0380_audio_register(struct mz0380_dev *dev) { return 0; }
 static inline void mz0380_audio_unregister(struct mz0380_dev *dev) {}
+static inline void mz0380_audio_push(struct mz0380_dev *dev, const void *data,
+				     size_t len) {}
 #endif
 
 /*

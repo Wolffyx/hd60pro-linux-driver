@@ -17,6 +17,8 @@
 #define MZ0380_ENC_SAFE_BITRATE	(4 * 1024 * 1024)
 
 void mz0380_drain_work_fn(struct work_struct *w);
+void mz0380_audio_work_fn(struct work_struct *work);
+void mz0380_audio_bufs_free(struct mz0380_dev *dev);
 void mz0380_enc_stat_ack(struct mz0380_dev *dev);
 void mz0380_frame_buffer_repoison(struct mz0380_dev *dev, u32 idx);
 void mz0380_raw_probe_buffer_repoison(struct mz0380_dev *dev, u32 idx);
