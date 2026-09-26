@@ -15417,3 +15417,13 @@ separated:
 
 Next: cold boot, a source known to embed audio (a PC or console HDMI output),
 one run of `scripts/mz0380-m246-audio-test.sh`.
+
+### M246 silence explained: the source has no audio
+
+The operator confirms the HDMI source embeds no audio, so all-zero PCM is the
+correct output, not a defect - the card's capture app clocks I2S silence at the
+requested rate, which is exactly what arrived. What remains unverified is only
+the non-zero case: that a source WITH audio produces the expected samples
+(channel order, endianness). Test with a PC or console output when one is
+available. The competing-daemons caveat stands for any future audio run: cold
+boot first, because each audio-enabled load leaves another capture app running.

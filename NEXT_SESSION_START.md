@@ -23,6 +23,7 @@ The node enumerates `YU12`, `NV12`, `YV12`, `H264` in that order and is named
 | M243 | the stepping brightness | the same camera through a USB capture card steps identically - **it is the camera's auto exposure**, not this driver |
 | M244 | `v4l2-compliance` had regressed to 142/6 | M240/M241 added NV12/YV12 to `ENUM_FMT` and not to `ENUM_FRAMESIZES` - back to **148/148** |
 | M245 | whole-driver review: 12 defects + cleanup | TRY_FMT mutating live state, unguarded S_FMT, unbind use-after-free, world-readable hardware /proc files, controls that wrote BAR5 and did nothing - compliance 48/48 with 0 warnings, unbind/controls/capture checks all PASS; suspend/resume and `.shutdown` untested |
+| M246 | HDMI audio: op 0x03 window, EVENT[19:16] + token 0x4c, SET_AIC bytes 4/5 corrected | transport proven on hardware (~47 x 4 KiB/s, ALSA delivers 48 kHz stereo); content silent because the source has no audio. Opt-in: `EXTRA="enable_audio=1"` |
 
 ### Retracted or refuted, and why - read before re-proposing any of them
 
@@ -39,7 +40,15 @@ and read it before believing the fix.**
 
 ## Open, in the order I would take them
 
-0. **M245 leftovers.** Compliance, unbind, controls and the second-process
+0. **M246 audio - verify with a source that has audio.** Cold boot first
+   (every audio-enabled load leaves another capture app running on the card,
+   and STOP does not end it), then `sudo scripts/mz0380-m246-audio-test.sh`
+   with a PC or console output playing sound. Transport is proven; only the
+   sample content (channel order, endianness) is unverified. Also worth
+   adding: silence while the card is not producing, so an application that
+   opens the ALSA device before any video capture does not hit ALSA's 10 s
+   timeout.
+0b. **M245 leftovers.** Compliance, unbind, controls and the second-process
    capture all passed on hardware. Not yet run: suspend/resume (untested code
    on the resume path) and `.shutdown` - a warm reboot after a capture is the
    cheap test, and a clean next boot with no IOMMU faults is the pass. The
