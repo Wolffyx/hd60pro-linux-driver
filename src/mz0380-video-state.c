@@ -146,9 +146,19 @@ void mz0380_video_state_dump(struct seq_file *m, struct mz0380_dev *dev)
 				   (unsigned long long)dev->raw_probe_stub_frames,
 				   mz0380_post_skip, mz0380_post_skip + 1,
 				   mz0380_raw_frame_bytes(dev));
-			seq_printf(m, "  raw fills  : %llu slots skipped with luma still clear (M229), %llu with luma done but CHROMA still clear (M238)\n",
+			/*
+			 * M244: the chroma test's own reachability, printed
+			 * next to its rejection count. Zero rejections out of
+			 * zero probes is dead code; zero out of thousands,
+			 * with the best match short of the sample count, is a
+			 * live test that never had cause to fire.
+			 */
+			seq_printf(m, "  raw fills  : %llu slots skipped with luma still clear (M229), %llu with luma done but CHROMA still clear (M238), chroma test ran %llu times, best %u/%u samples at the clear value (M244)\n",
 				   (unsigned long long)dev->raw_incomplete_tail,
-				   (unsigned long long)dev->raw_incomplete_chroma);
+				   (unsigned long long)dev->raw_incomplete_chroma,
+				   (unsigned long long)dev->raw_chroma_probes,
+				   dev->raw_chroma_max_clear,
+				   MZ0380_RAW_FILL_SAMPLES);
 			seq_printf(m, "  raw repeats: %llu identical-head observations, %llu torn frames discarded mid-copy, %llu completions with >1 slot ready (M222/M223)\n",
 				   (unsigned long long)dev->raw_dup_content,
 				   (unsigned long long)dev->raw_frames_torn,

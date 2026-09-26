@@ -288,6 +288,15 @@ struct mz0380_frame_event {
 #define MZ0380_SYSTEM_WQ system_wq
 #endif
 
+/*
+ * How the fill probes sample a slot: 32 dwords spread over the last 64 luma
+ * rows (M229) or over the whole chroma region (M238). In the header because
+ * /proc prints the sample count next to the M244 counters, so the number the
+ * operator reads and the number the test uses are the same symbol.
+ */
+#define MZ0380_RAW_FILL_SAMPLES  32
+#define MZ0380_RAW_FILL_ROWS     64
+
 struct mz0380_dev {
 	struct list_head devlist;
 	struct pci_dev *pci;
@@ -445,6 +454,19 @@ struct mz0380_dev {
 	u64 raw_incomplete_tail;
 	/* M238: slots whose luma was complete but whose CHROMA was not. */
 	u64 raw_incomplete_chroma;
+	/*
+	 * M244: what raw_incomplete_chroma == 0 actually means.
+	 *
+	 * A rejection counter that never moves cannot tell "wired and never
+	 * needed" apart from "never evaluated", which is exactly where M238
+	 * sat after its first hardware session. These two say which: probes
+	 * counts every evaluation of the chroma test, and max_clear records
+	 * the most sample dwords that ever matched the clear value in one
+	 * slot. Probes climbing with max_clear short of MZ0380_RAW_FILL_SAMPLES
+	 * is a live test that simply never had cause to fire.
+	 */
+	u64 raw_chroma_probes;
+	u32 raw_chroma_max_clear;
 	/* M233: AUTO_POSITION re-arms issued, i.e. real acquisition losses. */
 	u64 mst_rearms;
 	/* M237: last CSC byte written to BANK0 0x92, and whether one ever was. */

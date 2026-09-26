@@ -15044,3 +15044,131 @@ error counter. Its head-only comparison also makes it noisier than the
 whole-frame fingerprint, so prefer
 `scripts/mz0380-m226-blackframe-scan.py --fps <rate>` when the number matters.
 
+
+## M243 (2026-09-02): the brightness steps are the CAMERA, measured through a second capture card
+
+Three driver-side theories for the stepping brightness have been retracted
+(M234 full-range labelling, M237 CSC staleness, and the AUTO_POSITION latch of
+M233 as a complete explanation), each for the same reason: a number measured
+on the only path available, with no independent path to check it against.
+
+The operator moved the HDMI cable to a UGREEN 25173 USB capture card and ran
+the same scan, on the same camera, over the same kind of scene. Neither
+capture device knows anything about the other.
+
+| path | first -> last quarter | largest step | median step | verdict |
+|---|---|---|---|---|
+| USB (UGREEN 25173) | 53.39 -> 104.80 (+51.41) | 43.02 | 0.07 | STEPPED |
+| PCIe (this driver) | 54.18 -> 111.30 (+57.13) | 52.05 | 0.07 | STEPPED |
+
+Same shape, same magnitude, same timing: flat at about 52 luma for the first
+80 frames, one jump, then a plateau that holds to the end. A defect in this
+driver cannot reproduce itself inside an unrelated USB capture card, so the
+brightness stepping is the camera's own auto exposure. **Closed.**
+
+The remaining 110 vs 105 plateau gap is not exposure. It is range handling:
+the PCIe payload reaches 254 while the USB path arrives through ffmpeg's
+yuvj420p -> yuv420p conversion, which clamps to 16..235 by construction. That
+also disqualifies the range check as A/B evidence - the USB leg reports
+"limited range" no matter what the camera sends, so do NOT read the two
+RANGE VERDICTs as a difference between the cards. M234 stays retracted.
+
+### The first USB leg was 720p read as 1080p
+
+Worth recording because every verdict it printed looked plausible. ffmpeg was
+given no geometry, took the device's default 1280x720, and the scan sliced the
+stream as 1920x1080. 360 source frames x 1382400 bytes / 3110400 = exactly
+160, which is what it reported reading - and it invented three "partial fills"
+whose band profile repeats the same picture twice per frame, because that is
+what one resolution read as another looks like. `scripts/mz0380-m243-brightness-ab.sh`
+now pins `-video_size 1920x1080` and scales as a backstop.
+
+The lesson generalises: the scan trusts its caller for geometry, so any capture
+into it must state the geometry rather than accept a device default.
+
+## M244 (2026-09-02): the ABI grew two formats and the enumeration did not follow
+
+`v4l2-compliance` was 148/148 at M172 and had not been re-run since M240/M241
+added NV12 and YV12 to `ENUM_FMT`. It was **142/6**:
+
+```
+5 fail: v4l2-test-formats.cpp(1967): node->can_scale && node->frmsizes_count[...]
+1 fail: v4l2-test-io-config.cpp(239): doioctl(node, VIDIOC_S_DV_TIMINGS, &timings)
+```
+
+`mz0380_enum_framesizes` and `mz0380_enum_frameintervals` each carried their
+own inline list of acceptable fourccs - `V4L2_PIX_FMT_YUV420 || H264` - written
+before there were three raw layouts. So the node advertised NV12 and YV12
+through `ENUM_FMT` and then answered `-EINVAL` when asked for their frame
+sizes. v4l2-compliance reports a format with no enumerable sizes as a scaling
+failure, once per input, which is why one defect appeared five times.
+
+Both now call `mz0380_is_raw_fourcc`, the predicate the rest of the raw path
+already used, so the lists cannot drift apart again. Confirmed directly rather
+than by the suite alone - all four formats enumerate 1920x1080:
+
+```
+YU12: Size: Discrete 1920x1080     NV12: Size: Discrete 1920x1080
+YV12: Size: Discrete 1920x1080     H264: Size: Discrete 1920x1080
+```
+
+**148 tests, 148 succeeded, 0 failed.**
+
+The `S_DV_TIMINGS` failure disappeared in the same re-run and is NOT claimed as
+fixed - nothing in this change touches DV timings. The failing run had a
+foreign consumer holding the node (below); the clean one did not. Treat it as
+unexplained and watch for it.
+
+### Something else on the desktop opens the node the moment it appears
+
+One run of the M238 test failed its first phase with `VIDIOC_REQBUFS` returning
+`EBUSY` and `pixelformat` stuck at `H264`, while the counter watch recorded
+**2591 H.264 frames delivered** to a consumer this project never started.
+WirePlumber probes every new V4L2 node on udev add and the portals sit behind
+it.
+
+This is not cosmetic:
+
+- it spends encoder spawns from a budget of 8-18 per power cycle - one such
+  run took the tally from 1 to 3 without capturing anything;
+- it makes a capture fail for a reason that reads as a driver defect;
+- **two consumers contending is a live candidate for M232.** "Pipeline running,
+  VB2 detached, 20 attachments" is what contention looks like from inside the
+  driver, and M232 has never been reproduced deliberately.
+
+`scripts/mz0380-node-holders.sh` names the holders, and both hardware scripts
+call it before every capture phase. It needs root to see other users' file
+descriptors and says so rather than reporting a clean node it cannot verify.
+
+### M238 is reachable, and a rejection counter of 0 no longer means nothing
+
+M238's chroma-completeness check had never fired, and its counter reading 0
+could not distinguish "wired and never needed" from "never evaluated". Two
+counters now answer that: every evaluation is counted, and the high-water mark
+of matching samples is kept.
+
+| capture | probes | rejections | best match |
+|---|---|---|---|
+| 120 frames, black display | 217 | 0 | 14/32 |
+| 120 frames, normal content | 1140 | 0 | 16/32 |
+| 15264 frames, mixed scene | 15349 | 60 | 32/32 |
+| 24457 frames, mixed scene | 646405 | 356 | 32/32 |
+| 33447 frames, lit scene | 660323 | 420 | 32/32 |
+
+The check is live and it does fire, at roughly 0.4% to 1.5% of delivered
+frames. The evidence that these are genuine mid-fill catches rather than the
+documented false negative:
+
+- real content never approached the threshold. A monitor showing black reached
+  14 of 32 samples and normal content 16 of 32, because sensor noise of plus or
+  minus one breaks the exact-equality test. Every rejection is an exact 32/32,
+  which is what a DMA clear looks like and what content does not;
+- delivery did not stall during the dark stretches of the long runs. If neutral
+  content were tripping the test, rejection would approach total while the
+  picture was colourless; instead frames kept flowing at `mean_y` around 52.
+
+Not yet closed: the counters are cumulative, so they cannot date a rejection
+against the scene that produced it, and every long run so far contained some
+colourless stretch. `scripts/mz0380-m243-brightness-ab.sh` in `pcie` mode now
+runs the counter watch alongside the capture and prints the seconds at which
+`rawnochroma` moved, which reads directly against the scan's per-window luma.

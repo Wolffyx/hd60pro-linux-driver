@@ -20,6 +20,8 @@ The node enumerates `YU12`, `NV12`, `YV12`, `H264` in that order and is named
 | M240 | H.264 enumerated first, node named after a codec | reading ENUM_FMT against what camera apps actually do |
 | M241 | only I420 offered | NV12 and YV12 are free re-orderings of it; NV12 confirmed rendering |
 | M242 | 45% "duplicate frames" | whole-frame fingerprints at two rates - **not a defect**, the source is 30 fps on a 60 Hz link |
+| M243 | the stepping brightness | the same camera through a USB capture card steps identically - **it is the camera's auto exposure**, not this driver |
+| M244 | `v4l2-compliance` had regressed to 142/6 | M240/M241 added NV12/YV12 to `ENUM_FMT` and not to `ENUM_FRAMESIZES` - back to **148/148** |
 
 ### Retracted or refuted, and why - read before re-proposing any of them
 
@@ -36,24 +38,42 @@ and read it before believing the fix.**
 
 ## Open, in the order I would take them
 
-1. ~~**Duplicate frames.**~~ **CLOSED (M242): not a defect.** Whole-frame
+1. **M238, one measurement short of closed.** The chroma test is live and does
+   fire - M244 added a probe count and a best-match high-water mark, and across
+   five captures it ran up to 660k times and rejected 60 to 420 slots. Every
+   rejection is an exact 32/32 samples at the clear value, while real content
+   never got past 16/32 (a monitor showing black reached 14/32), so these look
+   like genuine mid-fill catches rather than the documented false negative.
+   What is missing is timing: the counters are cumulative and every long run so
+   far contained a colourless stretch. `mz0380-m243-brightness-ab.sh pcie` now
+   prints the seconds at which `rawnochroma` moved, which reads against the
+   scan's per-window luma. One lit, never-dark run settles it.
+2. **M232, with a new suspect.** Still not reproduced deliberately, but M244
+   found that something on the desktop - WirePlumber probes every new V4L2 node
+   on udev add - opens the node the moment it appears, and in one run streamed
+   2591 H.264 frames to a consumer this project never started. Two consumers
+   contending is exactly what "pipeline running, VB2 detached, 20 attachments"
+   looks like from inside the driver. `scripts/mz0380-node-holders.sh` names
+   the holders and both hardware scripts call it before every capture phase.
+   Try reproducing M232 by opening a second consumer on purpose.
+3. **The unexplained `S_DV_TIMINGS` failure.** Compliance failed
+   `v4l2-test-io-config.cpp(239)` once and passed on the next run. Nothing in
+   the M244 change touches DV timings; the failing run had a foreign consumer
+   on the node and the clean one did not. Not diagnosed, not claimed fixed.
+4. ~~**Duplicate frames.**~~ **CLOSED (M242): not a defect.** Whole-frame
    fingerprints at two sampling rates both imply ~30 fps of real content on a
-   60 Hz link, with duplicates as adjacent pairs. The camera sends each frame
-   twice and the driver delivers what it is given. `raw_dup_content` is a
-   source-rate indicator, not an error counter. This also retires the old
-   "61 completions/s against a receiver reading 30 fps" puzzle - the receiver
-   was right, the content is 30 fps and the signal is 60 Hz.
-2. **M238 unverified.** The chroma completeness check has never fired - both
-   counters read 0 in the only session that tested it. Neither confirmed nor
-   refuted.
-3. **M232.** A silent persistent encoder has no recovery path; only a module
-   reload clears it. Not reproduced since. Capture the watcher log from BEFORE
-   the consumer opens - both existing traces start after the silence.
-4. **Brightness.** Steps on scene changes rather than drifting, which is what
-   auto-exposure does, and no driver-side evidence supports otherwise. The
-   free test is the same camera through the USB path.
-5. **v4l2-compliance** has never been run clean. Do it non-streaming first;
-   the streaming tests open/close repeatedly and burn encoder spawns.
+   60 Hz link. `raw_dup_content` is a source-rate indicator, not an error
+   counter.
+5. ~~**Brightness.**~~ **CLOSED (M243): the camera.** The same camera through a
+   UGREEN 25173 USB capture card steps identically - +51 luma vs +57, largest
+   step 43 vs 52, median move 0.07 on both. Do not read the two RANGE VERDICTs
+   as a difference between the cards: the USB leg arrives through ffmpeg's
+   yuvj420p conversion, which clamps to 16..235 whatever the camera sends.
+   M234 stays retracted.
+6. ~~**v4l2-compliance.**~~ **CLEAN (M244): 148/148, 5 documented warnings.**
+   Re-run it after any ABI change - it costs no spawns and it is the only thing
+   in this tree that notices when an ENUM_FMT addition is not carried through
+   to the rest of the enumeration.
 
 ## Running it
 
@@ -119,8 +139,22 @@ deprecated rather than delete.
   change. Polls at 1s since M236; do NOT raise `procfs_verbosity` to 3 while
   capturing, that costs five mailbox commands per read and froze the desktop.
 
+- `scripts/mz0380-m238-chroma-test.sh` - loads, starts the counter watch
+  BEFORE any consumer opens (the window M232's two existing traces both lack),
+  then captures a phase per scene. Prompts go to the terminal, so it can be
+  piped without looking frozen; `PAUSE=<seconds>` makes it unattended.
+- `scripts/mz0380-m243-brightness-ab.sh` - the same scan on two capture paths.
+  `pcie` costs one spawn and runs the counter watch alongside; `usb /dev/videoN`
+  costs none. Pins the capture geometry, because the first USB leg took the
+  device's 720p default, was sliced as 1080p, and produced a full set of
+  confident and entirely false verdicts.
+- `scripts/mz0380-node-holders.sh` - who else has the node open. Root to see
+  other users' descriptors.
+
 Both were what closed M229, M231 and M239. Reading the code produced five wrong
-theories; measuring what arrives produced every right one.
+theories; measuring what arrives produced every right one. M243 extends that:
+the theories that survived were the ones checked against a SECOND capture path,
+and the ones that died were measured on ours alone.
 
 ## What this session built
 

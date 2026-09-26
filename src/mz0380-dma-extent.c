@@ -250,9 +250,6 @@ bool mz0380_raw_probe_frame_landed(struct mz0380_dev *dev, u32 idx)
  * a frame of a black picture and cannot persist. The opposite trade - passing
  * a half-filled frame - is the defect this exists to stop.
  */
-#define MZ0380_RAW_FILL_SAMPLES  32
-#define MZ0380_RAW_FILL_ROWS     64
-
 bool mz0380_raw_probe_frame_filled(struct mz0380_dev *dev, u32 idx)
 {
 	const struct mz0380_raw_probe_buf *b;
@@ -312,7 +309,7 @@ bool mz0380_raw_probe_chroma_filled(struct mz0380_dev *dev, u32 idx)
 {
 	const struct mz0380_raw_probe_buf *b;
 	size_t frame, luma, chroma, base, step;
-	u32 clear;
+	u32 clear, matched;
 	unsigned int i;
 
 	if (idx >= MZ0380_RAW_PROBE_NR_BUFS)
@@ -337,13 +334,25 @@ bool mz0380_raw_probe_chroma_filled(struct mz0380_dev *dev, u32 idx)
 
 	clear = 0x01010101u * (mz0380_raw_clear_chroma & 0xff);
 	dma_rmb();
+	/*
+	 * M244: count the evaluation and how close it came, not just the
+	 * rejections. The all-or-nothing test below returns on its first
+	 * mismatch, so a full count needs its own loop - 32 reads of memory
+	 * this function is already walking, on a path that runs once per
+	 * candidate slot.
+	 */
+	dev->raw_chroma_probes++;
+	matched = 0;
 	for (i = 0; i < MZ0380_RAW_FILL_SAMPLES; i++) {
 		const u32 *p = b->va + base + (size_t)i * step;
 
-		if (READ_ONCE(*p) != clear)
-			return true;
+		if (READ_ONCE(*p) == clear)
+			matched++;
 	}
-	return false;
+	if (matched > dev->raw_chroma_max_clear)
+		dev->raw_chroma_max_clear = matched;
+
+	return matched < MZ0380_RAW_FILL_SAMPLES;
 }
 
 /*

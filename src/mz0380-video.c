@@ -691,9 +691,20 @@ static int mz0380_enum_framesizes(struct file *file, void *priv,
 {
 	struct mz0380_dev *dev = video_drvdata(file);
 
+	/*
+	 * M244: accept every format ENUM_FMT offers, which since M241 is three
+	 * raw layouts and not one.
+	 *
+	 * NV12 and YV12 were added to the format list and not here, so the
+	 * node advertised two formats whose frame sizes could not be
+	 * enumerated. v4l2-compliance failed it five times over as a scaling
+	 * defect, which is what a format with no frame sizes looks like from
+	 * the outside. mz0380_is_raw_fourcc is the same predicate the rest of
+	 * the raw path uses, so the two lists cannot drift apart again.
+	 */
 	if (fsize->pixel_format != mz0380_current_pixelformat(dev) &&
 	    !(dev->raw_capable &&
-	      (fsize->pixel_format == V4L2_PIX_FMT_YUV420 ||
+	      (mz0380_is_raw_fourcc(fsize->pixel_format) ||
 	       fsize->pixel_format == V4L2_PIX_FMT_H264)))
 		return -EINVAL;
 
@@ -748,9 +759,10 @@ static int mz0380_enum_frameintervals(struct file *file, void *priv,
 	const struct v4l2_fract *interval;
 	struct mz0380_capture_state capture = { 0 };
 
+	/* M244: the same three raw layouts ENUM_FMT and ENUM_FRAMESIZES list. */
 	if (fival->pixel_format != mz0380_current_pixelformat(dev) &&
 	    !(dev->raw_capable &&
-	      (fival->pixel_format == V4L2_PIX_FMT_YUV420 ||
+	      (mz0380_is_raw_fourcc(fival->pixel_format) ||
 	       fival->pixel_format == V4L2_PIX_FMT_H264)))
 		return -EINVAL;
 

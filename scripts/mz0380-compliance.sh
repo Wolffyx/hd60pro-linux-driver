@@ -29,14 +29,18 @@ sleep 3
 NODE=
 for n in /sys/class/video4linux/video*/name; do
 	[ -r "$n" ] || continue
+	# M240 renamed the node to "HD60 Pro HDMI capture"; older builds
+	# called it mz0380. Match either, or this finds nothing.
 	case "$(cat "$n")" in
-	mz0380*) NODE=/dev/$(basename "$(dirname "$n")");;
+	mz0380*|"HD60 Pro HDMI capture"*) NODE=/dev/$(basename "$(dirname "$n")");;
 	esac
 done
 [ -n "$NODE" ] || { echo "no mz0380 video node"; exit 1; }
 
 OUT=$(mktemp /tmp/mz0380-compliance.XXXXXX)
 v4l2-compliance -d "$NODE" > "$OUT" 2>&1
+# Written by root, read by whoever debugs the failures afterwards.
+chmod 644 "$OUT"
 
 echo "=== failures ==="
 grep -E "fail:|FAIL" "$OUT" | sed 's/^[[:space:]]*//' | sort | uniq -c | sort -rn
@@ -45,4 +49,12 @@ echo "=== warnings ==="
 grep -E "warn:" "$OUT" | sed 's/^[[:space:]]*//' | sed 's/for input [0-9]*//' | sort | uniq -c
 echo
 grep "^Total" "$OUT"
+
+# A failure line on its own does not say which ioctl call produced it. Print
+# the test block each failure sits in, which does.
+if grep -q "fail:" "$OUT"; then
+	echo
+	echo "=== context around each failure ==="
+	grep -n -B8 "fail:" "$OUT" | sed 's/^/  /'
+fi
 echo "(full output: $OUT)"
