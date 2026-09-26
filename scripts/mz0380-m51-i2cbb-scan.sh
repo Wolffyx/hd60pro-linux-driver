@@ -14,7 +14,7 @@
 #
 # Decision table:
 #   - "ACK at 0x50" (and/or 0x51..0x57)  -> EDID EEPROM FOUND. Burn it:
-#         echo edidburn <sda> <scl> 50 > /proc/mz0380-hdmi
+#         (edidburn was removed in M245 - it wrote the card's EEPROM)
 #     A VERIFIED burn is permanent (non-volatile) - then pulse HPD
 #     (echo "hpd 3 4000" > /proc/mz0380-hdmi) and watch the source: if it
 #     starts transmitting, the EDID blocker is DEAD without a Windows trace.

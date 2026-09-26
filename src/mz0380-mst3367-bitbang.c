@@ -93,7 +93,6 @@ int mz0380_gpio_dump(struct mz0380_dev *dev)
 				dev->name, pin);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_gpio_dump);
 
 /* release = input, pull-up floats the line high */
 static int mz0380_bb_release(struct mz0380_dev *dev, u8 pin)
@@ -193,21 +192,6 @@ static int mz0380_bb_write_byte(struct mz0380_bb_bus *b, u8 byte)
 	return ack;   /* SDA low during 9th clock = ACK(0) */
 }
 
-static int mz0380_bb_read_byte(struct mz0380_bb_bus *b, u8 *byte, bool ack)
-{
-	u8 bit;
-	int i, ret;
-
-	*byte = 0;
-	for (i = 7; i >= 0; i--) {
-		ret = mz0380_bb_read_bit(b, &bit);
-		if (ret)
-			return ret;
-		*byte |= (u8)bit << i;
-	}
-	return mz0380_bb_write_bit(b, !ack);   /* ACK = drive low */
-}
-
 int mz0380_i2cbb_scan(struct mz0380_dev *dev, u8 sda, u8 scl)
 {
 	struct mz0380_bb_bus b = { .dev = dev, .sda = sda, .scl = scl };
@@ -271,95 +255,14 @@ int mz0380_i2cbb_scan(struct mz0380_dev *dev, u8 sda, u8 scl)
 		pr_info("%s: i2cbb scan done: %u device(s)\n", dev->name, acks);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_i2cbb_scan);
 
 /*
- * Burn the validated EDID into the DDC EEPROM found by the scan, 8-byte
- * pages (safe for 24C02..24C16 parts), ack-poll between pages, then read
- * everything back and compare. One-time operation: the EEPROM is
- * non-volatile, so a verified burn permanently un-blocks the source's EDID
- * read - no Windows trace needed.
+ * M245: the EEPROM burn that lived here is gone, for the same reason the
+ * firmware upload path was deleted: it wrote non-volatile storage on the card
+ * - by GPIO bit-bang, to any 7-bit address, from a /proc write - and a wrong
+ * pin pair or address could overwrite a part the card needs to boot. The
+ * scan above only reads, and stays.
  */
-int mz0380_i2cbb_edid_burn(struct mz0380_dev *dev, u8 sda, u8 scl, u8 addr7)
-{
-	struct mz0380_bb_bus b = { .dev = dev, .sda = sda, .scl = scl };
-	unsigned int off, i, poll;
-	u8 rd;
-	int ret;
-
-	if (dev->fw_state != MZ0380_FW_STATE_READY) {
-		pr_info("%s: i2cbb burn: firmware not READY (state %s) - mailbox dead, cold boot needed?\n",
-			dev->name, mz0380_fw_state_name(dev->fw_state));
-		return -ENODEV;
-	}
-
-	pr_info("%s: i2cbb EDID burn -> dev 0x%02x (sda=%u scl=%u), %u bytes\n",
-		dev->name, addr7, sda, scl, MZ0380_EDID_SIZE);
-
-	for (off = 0; off < MZ0380_EDID_SIZE; off += 8) {
-		ret = mz0380_bb_start(&b);
-		ret = ret < 0 ? ret : mz0380_bb_write_byte(&b, addr7 << 1);
-		if (ret > 0) {
-			pr_info("%s: i2cbb burn: NAK on address at off %u\n",
-				dev->name, off);
-			mz0380_bb_stop(&b);
-			return -ENXIO;
-		}
-		ret = ret < 0 ? ret : mz0380_bb_write_byte(&b, off);
-		for (i = 0; !ret && i < 8; i++)
-			ret = mz0380_bb_write_byte(&b,
-						   mz0380_edid_default[off + i]);
-		if (ret >= 0)
-			mz0380_bb_stop(&b);
-		if (ret) {
-			pr_info("%s: i2cbb burn failed at off %u (%d)\n",
-				dev->name, off, ret);
-			return ret < 0 ? ret : -EIO;
-		}
-
-		/* ack-poll until the internal page write completes */
-		for (poll = 0; poll < 20; poll++) {
-			ret = mz0380_bb_start(&b);
-			ret = ret < 0 ? ret : mz0380_bb_write_byte(&b, addr7 << 1);
-			if (ret >= 0)
-				mz0380_bb_stop(&b);
-			if (ret <= 0)
-				break;
-		}
-		if (ret)
-			pr_info("%s: i2cbb burn: ack-poll never ACKed after page %u\n",
-				dev->name, off / 8);
-	}
-
-	/* verify: sequential read of the whole array */
-	ret = mz0380_bb_start(&b);
-	ret = ret < 0 ? ret : mz0380_bb_write_byte(&b, addr7 << 1);
-	ret = ret < 0 ? ret : mz0380_bb_write_byte(&b, 0);
-	ret = ret < 0 ? ret : mz0380_bb_start(&b);   /* repeated start */
-	ret = ret < 0 ? ret : mz0380_bb_write_byte(&b, (addr7 << 1) | 1);
-	if (ret) {
-		pr_info("%s: i2cbb verify setup failed (%d)\n", dev->name, ret);
-		return ret < 0 ? ret : -EIO;
-	}
-	for (off = 0; off < MZ0380_EDID_SIZE; off++) {
-		ret = mz0380_bb_read_byte(&b, &rd,
-					  off != MZ0380_EDID_SIZE - 1);
-		if (ret < 0)
-			return ret;
-		if (rd != mz0380_edid_default[off]) {
-			pr_info("%s: i2cbb VERIFY MISMATCH at %u: wrote 0x%02x read 0x%02x\n",
-				dev->name, off, mz0380_edid_default[off], rd);
-			mz0380_bb_stop(&b);
-			return -EIO;
-		}
-	}
-	mz0380_bb_stop(&b);
-
-	pr_info("%s: i2cbb EDID burn VERIFIED - %u bytes match; pulse HPD and the source should now read a valid EDID\n",
-		dev->name, MZ0380_EDID_SIZE);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(mz0380_i2cbb_edid_burn);
 
 /* --- M53: hunt an INDIRECT address/data port into the EDID RAM ----------- */
 
@@ -511,4 +414,3 @@ out_unlock:
 	mutex_unlock(&mst3367_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_edidhunt);

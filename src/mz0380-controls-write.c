@@ -33,17 +33,15 @@ int mz0380_request_input_select(struct mz0380_dev *dev, u32 input,
 						    source, use_candidate);
 	mutex_unlock(&dev->ctrl_lock);
 
-	printk(KERN_INFO
-	       "%s: property %u input-select request %u (%s) via %s -> %s\n",
-	       dev->name, exp->property_id, exp->requested_value,
-	       mz0380_input_name(exp->requested_value), exp->source,
-	       mz0380_property_experiment_result_name(exp->result));
+	pr_info("%s: property %u input-select request %u (%s) via %s -> %s\n",
+		dev->name, exp->property_id, exp->requested_value,
+		mz0380_input_name(exp->requested_value), exp->source,
+		mz0380_property_experiment_result_name(exp->result));
 	if (exp->hardware_write)
-		printk(KERN_INFO
-		       "%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
-		       dev->name, exp->property_id, exp->reg, exp->mask,
-		       exp->shift, exp->before_word, exp->programmed_word,
-		       exp->readback_word);
+		pr_info("%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
+			dev->name, exp->property_id, exp->reg, exp->mask,
+			exp->shift, exp->before_word, exp->programmed_word,
+			exp->readback_word);
 
 	return ret;
 }
@@ -72,17 +70,15 @@ int mz0380_request_bitrate_locked(struct mz0380_dev *dev, u32 bitrate,
 						    MZ0380_BITRATE_HW_SHIFT,
 						    source, use_candidate);
 
-	printk(KERN_INFO
-	       "%s: property %u bitrate request %u via %s -> %s\n",
-	       dev->name, exp->property_id, exp->requested_value,
-	       exp->source,
-	       mz0380_property_experiment_result_name(exp->result));
+	pr_info("%s: property %u bitrate request %u via %s -> %s\n",
+		dev->name, exp->property_id, exp->requested_value,
+		exp->source,
+		mz0380_property_experiment_result_name(exp->result));
 	if (exp->hardware_write)
-		printk(KERN_INFO
-		       "%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
-		       dev->name, exp->property_id, exp->reg, exp->mask,
-		       exp->shift, exp->before_word, exp->programmed_word,
-		       exp->readback_word);
+		pr_info("%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
+			dev->name, exp->property_id, exp->reg, exp->mask,
+			exp->shift, exp->before_word, exp->programmed_word,
+			exp->readback_word);
 
 	return ret;
 }
@@ -124,17 +120,15 @@ int mz0380_request_quality_locked(struct mz0380_dev *dev, u32 quality,
 						    MZ0380_QUALITY_HW_SHIFT,
 						    source, use_candidate);
 
-	printk(KERN_INFO
-	       "%s: property %u quality request %u via %s -> %s\n",
-	       dev->name, exp->property_id, exp->requested_value,
-	       exp->source,
-	       mz0380_property_experiment_result_name(exp->result));
+	pr_info("%s: property %u quality request %u via %s -> %s\n",
+		dev->name, exp->property_id, exp->requested_value,
+		exp->source,
+		mz0380_property_experiment_result_name(exp->result));
 	if (exp->hardware_write)
-		printk(KERN_INFO
-		       "%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
-		       dev->name, exp->property_id, exp->reg, exp->mask,
-		       exp->shift, exp->before_word, exp->programmed_word,
-		       exp->readback_word);
+		pr_info("%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
+			dev->name, exp->property_id, exp->reg, exp->mask,
+			exp->shift, exp->before_word, exp->programmed_word,
+			exp->readback_word);
 
 	return ret;
 }
@@ -176,17 +170,15 @@ int mz0380_request_gop_locked(struct mz0380_dev *dev, u32 gop,
 						    MZ0380_GOP_HW_SHIFT,
 						    source, use_candidate);
 
-	printk(KERN_INFO
-	       "%s: property %u GOP request %u via %s -> %s\n",
-	       dev->name, exp->property_id, exp->requested_value,
-	       exp->source,
-	       mz0380_property_experiment_result_name(exp->result));
+	pr_info("%s: property %u GOP request %u via %s -> %s\n",
+		dev->name, exp->property_id, exp->requested_value,
+		exp->source,
+		mz0380_property_experiment_result_name(exp->result));
 	if (exp->hardware_write)
-		printk(KERN_INFO
-		       "%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
-		       dev->name, exp->property_id, exp->reg, exp->mask,
-		       exp->shift, exp->before_word, exp->programmed_word,
-		       exp->readback_word);
+		pr_info("%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
+			dev->name, exp->property_id, exp->reg, exp->mask,
+			exp->shift, exp->before_word, exp->programmed_word,
+			exp->readback_word);
 
 	return ret;
 }
@@ -232,17 +224,15 @@ int mz0380_request_b_frames_locked(struct mz0380_dev *dev, u32 b_frames,
 						    MZ0380_B_FRAMES_HW_SHIFT,
 						    source, use_candidate);
 
-	printk(KERN_INFO
-	       "%s: property %u B-frames request %u via %s -> %s\n",
-	       dev->name, exp->property_id, exp->requested_value,
-	       exp->source,
-	       mz0380_property_experiment_result_name(exp->result));
+	pr_info("%s: property %u B-frames request %u via %s -> %s\n",
+		dev->name, exp->property_id, exp->requested_value,
+		exp->source,
+		mz0380_property_experiment_result_name(exp->result));
 	if (exp->hardware_write)
-		printk(KERN_INFO
-		       "%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
-		       dev->name, exp->property_id, exp->reg, exp->mask,
-		       exp->shift, exp->before_word, exp->programmed_word,
-		       exp->readback_word);
+		pr_info("%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
+			dev->name, exp->property_id, exp->reg, exp->mask,
+			exp->shift, exp->before_word, exp->programmed_word,
+			exp->readback_word);
 
 	return ret;
 }
@@ -284,17 +274,15 @@ int mz0380_request_qp_step_locked(struct mz0380_dev *dev, u32 qp_step,
 						    MZ0380_QP_STEP_HW_SHIFT,
 						    source, use_candidate);
 
-	printk(KERN_INFO
-	       "%s: property %u QP-step request %u via %s -> %s\n",
-	       dev->name, exp->property_id, exp->requested_value,
-	       exp->source,
-	       mz0380_property_experiment_result_name(exp->result));
+	pr_info("%s: property %u QP-step request %u via %s -> %s\n",
+		dev->name, exp->property_id, exp->requested_value,
+		exp->source,
+		mz0380_property_experiment_result_name(exp->result));
 	if (exp->hardware_write)
-		printk(KERN_INFO
-		       "%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
-		       dev->name, exp->property_id, exp->reg, exp->mask,
-		       exp->shift, exp->before_word, exp->programmed_word,
-		       exp->readback_word);
+		pr_info("%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
+			dev->name, exp->property_id, exp->reg, exp->mask,
+			exp->shift, exp->before_word, exp->programmed_word,
+			exp->readback_word);
 
 	return ret;
 }
@@ -340,17 +328,15 @@ int mz0380_request_record_mode_locked(struct mz0380_dev *dev, u32 mode,
 						    MZ0380_RECORD_MODE_HW_SHIFT,
 						    source, use_candidate);
 
-	printk(KERN_INFO
-	       "%s: property %u record-mode request %u (%s) via %s -> %s\n",
-	       dev->name, exp->property_id, exp->requested_value,
-	       mz0380_record_mode_name(exp->requested_value), exp->source,
-	       mz0380_property_experiment_result_name(exp->result));
+	pr_info("%s: property %u record-mode request %u (%s) via %s -> %s\n",
+		dev->name, exp->property_id, exp->requested_value,
+		mz0380_record_mode_name(exp->requested_value), exp->source,
+		mz0380_property_experiment_result_name(exp->result));
 	if (exp->hardware_write)
-		printk(KERN_INFO
-		       "%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
-		       dev->name, exp->property_id, exp->reg, exp->mask,
-		       exp->shift, exp->before_word, exp->programmed_word,
-		       exp->readback_word);
+		pr_info("%s: property %u BAR5 write reg=0x%04x mask=0x%08x shift=%u before=%08x programmed=%08x readback=%08x\n",
+			dev->name, exp->property_id, exp->reg, exp->mask,
+			exp->shift, exp->before_word, exp->programmed_word,
+			exp->readback_word);
 
 	return ret;
 }

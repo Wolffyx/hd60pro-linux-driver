@@ -22,6 +22,7 @@ The node enumerates `YU12`, `NV12`, `YV12`, `H264` in that order and is named
 | M242 | 45% "duplicate frames" | whole-frame fingerprints at two rates - **not a defect**, the source is 30 fps on a 60 Hz link |
 | M243 | the stepping brightness | the same camera through a USB capture card steps identically - **it is the camera's auto exposure**, not this driver |
 | M244 | `v4l2-compliance` had regressed to 142/6 | M240/M241 added NV12/YV12 to `ENUM_FMT` and not to `ENUM_FRAMESIZES` - back to **148/148** |
+| M245 | whole-driver review: 12 defects + cleanup | TRY_FMT mutating live state, unguarded S_FMT, unbind use-after-free, world-readable hardware /proc files, controls that wrote BAR5 and did nothing - compliance 48/48 with 0 warnings, unbind/controls/capture checks all PASS; suspend/resume and `.shutdown` untested |
 
 ### Retracted or refuted, and why - read before re-proposing any of them
 
@@ -38,6 +39,11 @@ and read it before believing the fix.**
 
 ## Open, in the order I would take them
 
+0. **M245 leftovers.** Compliance, unbind, controls and the second-process
+   capture all passed on hardware. Not yet run: suspend/resume (untested code
+   on the resume path) and `.shutdown` - a warm reboot after a capture is the
+   cheap test, and a clean next boot with no IOMMU faults is the pass. The
+   power_present fix made after the first run is verified.
 1. **M238, one measurement short of closed.** The chroma test is live and does
    fire - M244 added a probe count and a best-match high-water mark, and across
    five captures it ran up to 660k times and rejected 60 to 420 slots. Every

@@ -89,8 +89,7 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 	strim(cmd);
 	if (!strcmp(cmd, "writes on")) {
 		allow_experimental_writes = true;
-		printk(KERN_INFO
-		       "mz0380: experimental BAR5 writes enabled via procfs\n");
+		pr_info("mz0380: experimental BAR5 writes enabled via procfs\n");
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -98,8 +97,7 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 
 	if (!strcmp(cmd, "writes off")) {
 		allow_experimental_writes = false;
-		printk(KERN_INFO
-		       "mz0380: experimental BAR5 writes disabled via procfs\n");
+		pr_info("mz0380: experimental BAR5 writes disabled via procfs\n");
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -107,8 +105,7 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 
 	if (!strcmp(cmd, "candidate clear")) {
 		mz0380_input_candidate_clear();
-		printk(KERN_INFO
-		       "mz0380: property 201 candidate register cleared via procfs\n");
+		pr_info("mz0380: property 201 candidate register cleared via procfs\n");
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -116,8 +113,7 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 
 	if (!strcmp(cmd, "recordmode-candidate clear")) {
 		mz0380_record_mode_candidate_clear();
-		printk(KERN_INFO
-		       "mz0380: property 407 candidate register cleared via procfs\n");
+		pr_info("mz0380: property 407 candidate register cleared via procfs\n");
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -125,8 +121,7 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 
 	if (!strcmp(cmd, "bitrate-candidate clear")) {
 		mz0380_bitrate_candidate_clear();
-		printk(KERN_INFO
-		       "mz0380: property 403 candidate register cleared via procfs\n");
+		pr_info("mz0380: property 403 candidate register cleared via procfs\n");
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -134,8 +129,7 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 
 	if (!strcmp(cmd, "quality-candidate clear")) {
 		mz0380_quality_candidate_clear();
-		printk(KERN_INFO
-		       "mz0380: property 404 candidate register cleared via procfs\n");
+		pr_info("mz0380: property 404 candidate register cleared via procfs\n");
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -143,8 +137,7 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 
 	if (!strcmp(cmd, "gop-candidate clear")) {
 		mz0380_gop_candidate_clear();
-		printk(KERN_INFO
-		       "mz0380: property 405 candidate register cleared via procfs\n");
+		pr_info("mz0380: property 405 candidate register cleared via procfs\n");
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -152,8 +145,7 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 
 	if (!strcmp(cmd, "bframes-candidate clear")) {
 		mz0380_b_frames_candidate_clear();
-		printk(KERN_INFO
-		       "mz0380: property 411 candidate register cleared via procfs\n");
+		pr_info("mz0380: property 411 candidate register cleared via procfs\n");
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -161,8 +153,7 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 
 	if (!strcmp(cmd, "qpstep-candidate clear")) {
 		mz0380_qp_step_candidate_clear();
-		printk(KERN_INFO
-		       "mz0380: property 408 candidate register cleared via procfs\n");
+		pr_info("mz0380: property 408 candidate register cleared via procfs\n");
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -171,10 +162,9 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 	if (sscanf(cmd, "candidate %x %x %u",
 		   &reg, &mask, &shift) == 3) {
 		mz0380_input_candidate_set(reg, mask, shift);
-		printk(KERN_INFO
-		       "mz0380: property 201 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
-		       input_select_reg, input_select_mask,
-		       input_select_shift);
+		pr_info("mz0380: property 201 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
+			input_select_reg, input_select_mask,
+			input_select_shift);
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -183,9 +173,8 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 	if (sscanf(cmd, "bitrate-candidate %x %x %u",
 		   &reg, &mask, &shift) == 3) {
 		mz0380_bitrate_candidate_set(reg, mask, shift);
-		printk(KERN_INFO
-		       "mz0380: property 403 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
-		       bitrate_reg, bitrate_mask, bitrate_shift);
+		pr_info("mz0380: property 403 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
+			bitrate_reg, bitrate_mask, bitrate_shift);
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -194,9 +183,8 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 	if (sscanf(cmd, "quality-candidate %x %x %u",
 		   &reg, &mask, &shift) == 3) {
 		mz0380_quality_candidate_set(reg, mask, shift);
-		printk(KERN_INFO
-		       "mz0380: property 404 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
-		       quality_reg, quality_mask, quality_shift);
+		pr_info("mz0380: property 404 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
+			quality_reg, quality_mask, quality_shift);
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -205,9 +193,8 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 	if (sscanf(cmd, "gop-candidate %x %x %u",
 		   &reg, &mask, &shift) == 3) {
 		mz0380_gop_candidate_set(reg, mask, shift);
-		printk(KERN_INFO
-		       "mz0380: property 405 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
-		       gop_reg, gop_mask, gop_shift);
+		pr_info("mz0380: property 405 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
+			gop_reg, gop_mask, gop_shift);
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -216,9 +203,8 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 	if (sscanf(cmd, "bframes-candidate %x %x %u",
 		   &reg, &mask, &shift) == 3) {
 		mz0380_b_frames_candidate_set(reg, mask, shift);
-		printk(KERN_INFO
-		       "mz0380: property 411 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
-		       b_frames_reg, b_frames_mask, b_frames_shift);
+		pr_info("mz0380: property 411 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
+			b_frames_reg, b_frames_mask, b_frames_shift);
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -227,9 +213,8 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 	if (sscanf(cmd, "qpstep-candidate %x %x %u",
 		   &reg, &mask, &shift) == 3) {
 		mz0380_qp_step_candidate_set(reg, mask, shift);
-		printk(KERN_INFO
-		       "mz0380: property 408 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
-		       qp_step_reg, qp_step_mask, qp_step_shift);
+		pr_info("mz0380: property 408 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
+			qp_step_reg, qp_step_mask, qp_step_shift);
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -238,10 +223,9 @@ static ssize_t mz0380_proc_experiment_write(struct file *file,
 	if (sscanf(cmd, "recordmode-candidate %x %x %u",
 		   &reg, &mask, &shift) == 3) {
 		mz0380_record_mode_candidate_set(reg, mask, shift);
-		printk(KERN_INFO
-		       "mz0380: property 407 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
-		       record_mode_reg, record_mode_mask,
-		       record_mode_shift);
+		pr_info("mz0380: property 407 candidate set via procfs reg=0x%04x mask=0x%08x shift=%u\n",
+			record_mode_reg, record_mode_mask,
+			record_mode_shift);
 		*ppos += count;
 		ret = count;
 		goto out;
@@ -353,81 +337,6 @@ static int mz0380_proc_cmd_open(struct inode *inode, struct file *filp)
 	return single_open(filp, mz0380_proc_cmd_show, NULL);
 }
 
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 0, 0)
-static struct file_operations mz0380_proc_fops = {
-	.open = mz0380_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static struct file_operations mz0380_proc_state_fops = {
-	.open = mz0380_proc_state_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static struct file_operations mz0380_proc_snapshot_fops = {
-	.open = mz0380_proc_snapshot_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static struct file_operations mz0380_proc_control_fops = {
-	.open = mz0380_proc_control_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static struct file_operations mz0380_proc_experiment_fops = {
-	.open = mz0380_proc_experiment_open,
-	.read = seq_read,
-	.write = mz0380_proc_experiment_write,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static struct file_operations mz0380_proc_scan_fops = {
-	.open = mz0380_proc_scan_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static struct file_operations mz0380_proc_periph_scan_fops = {
-	.open = mz0380_proc_periph_scan_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static struct file_operations mz0380_proc_events_fops = {
-	.open = mz0380_proc_events_open,
-	.read = seq_read,
-	.write = mz0380_proc_events_write,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static struct file_operations mz0380_proc_hdmi_fops = {
-	.open = mz0380_proc_hdmi_open,
-	.read = seq_read,
-	.write = mz0380_proc_hdmi_write,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static struct file_operations mz0380_proc_cmd_fops = {
-	.open = mz0380_proc_cmd_open,
-	.read = seq_read,
-	.write = mz0380_proc_cmd_write,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-#else
 static struct proc_ops mz0380_proc_fops = {
 	.proc_open = mz0380_proc_open,
 	.proc_read = seq_read,
@@ -501,7 +410,6 @@ static struct proc_ops mz0380_proc_cmd_fops = {
 	.proc_lseek = seq_lseek,
 	.proc_release = single_release,
 };
-#endif
 
 /*
  * M76: read 16 bytes from the card's /mnt/flash/PIC_ENC via LOAD_FILES.
@@ -722,6 +630,16 @@ void mz0380_proc_remove(void)
 	remove_proc_entry("mz0380", NULL);
 }
 
+/*
+ * M245: who may read what.
+ *
+ * Anything whose READ drives the card - raw BAR windows (scan), mailbox I2C
+ * (periph-scan: up to 256 commands, each up to a second under cmd_lock; hdmi:
+ * the receiver diag) - is root-only. They were world-readable, so any user
+ * could stall a capture with cat. state, snapshot, control and events stay
+ * readable: the unprivileged counter watch reads state, and the one part of it
+ * that talks to the card is gated on CAP_SYS_ADMIN in mz0380_fw_info_dump().
+ */
 int mz0380_proc_create(void)
 {
 	struct proc_dir_entry *pe;
@@ -770,13 +688,13 @@ int mz0380_proc_create(void)
 		return -ENOMEM;
 	}
 
-	pe = proc_create("mz0380-scan", 0444, NULL, &mz0380_proc_scan_fops);
+	pe = proc_create("mz0380-scan", 0400, NULL, &mz0380_proc_scan_fops);
 	if (!pe) {
 		mz0380_proc_remove();
 		return -ENOMEM;
 	}
 
-	pe = proc_create("mz0380-periph-scan", 0444, NULL,
+	pe = proc_create("mz0380-periph-scan", 0400, NULL,
 			 &mz0380_proc_periph_scan_fops);
 	if (!pe) {
 		mz0380_proc_remove();
@@ -789,13 +707,13 @@ int mz0380_proc_create(void)
 		return -ENOMEM;
 	}
 
-	pe = proc_create("mz0380-hdmi", 0644, NULL, &mz0380_proc_hdmi_fops);
+	pe = proc_create("mz0380-hdmi", 0600, NULL, &mz0380_proc_hdmi_fops);
 	if (!pe) {
 		mz0380_proc_remove();
 		return -ENOMEM;
 	}
 
-	pe = proc_create("mz0380-cmd", 0644, NULL, &mz0380_proc_cmd_fops);
+	pe = proc_create("mz0380-cmd", 0600, NULL, &mz0380_proc_cmd_fops);
 	if (!pe) {
 		mz0380_proc_remove();
 		return -ENOMEM;

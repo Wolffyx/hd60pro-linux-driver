@@ -33,6 +33,8 @@
  *  parameter, not the .HEX blob names. Do not re-add any of it.
  */
 
+#include <linux/capability.h>
+
 #include "mz0380.h"
 
 const char *mz0380_fw_state_name(enum mz0380_fw_state s)
@@ -45,7 +47,6 @@ const char *mz0380_fw_state_name(enum mz0380_fw_state s)
 	}
 	return "unknown";
 }
-EXPORT_SYMBOL_GPL(mz0380_fw_state_name);
 
 /*
  * M0 observability: read-only dump of card state plus the live mailbox
@@ -103,7 +104,13 @@ void mz0380_fw_info_dump(struct seq_file *m, struct mz0380_dev *dev)
 	 * The probe is labelled UNVERIFIED and exists for RE correlation, so it
 	 * has no business on the path a watch script reads. Ask for it.
 	 */
-	if (dev->fw_state == MZ0380_FW_STATE_READY && procfs_verbosity > 2) {
+	/*
+	 * M245: and only for a reader who may drive the card. /proc/mz0380-state
+	 * is world-readable so the counter watch needs no root; these reads go
+	 * through the mailbox, so an unprivileged reader must not trigger them.
+	 */
+	if (dev->fw_state == MZ0380_FW_STATE_READY && procfs_verbosity > 2 &&
+	    m->file && file_ns_capable(m->file, &init_user_ns, CAP_SYS_ADMIN)) {
 		/*
 		 * Non-clearing chip-0x90 regs only: the ISR treats 0x13/0x14/
 		 * 0x15 (and re-reads 0x10) as read-to-clear, so cat'ing them
@@ -124,7 +131,6 @@ void mz0380_fw_info_dump(struct seq_file *m, struct mz0380_dev *dev)
 		seq_putc(m, '\n');
 	}
 }
-EXPORT_SYMBOL_GPL(mz0380_fw_info_dump);
 
 /*
  * Parse the "MM.mm" ASCII sidecar version file (MZ0380.FW.TXT). This is where
@@ -202,7 +208,6 @@ int mz0380_firmware_load(struct mz0380_dev *dev)
 	mutex_unlock(&dev->fw_lock);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_firmware_load);
 
 void mz0380_firmware_release(struct mz0380_dev *dev)
 {
@@ -210,4 +215,3 @@ void mz0380_firmware_release(struct mz0380_dev *dev)
 	dev->fw_state = MZ0380_FW_STATE_NONE;
 	mutex_unlock(&dev->fw_lock);
 }
-EXPORT_SYMBOL_GPL(mz0380_firmware_release);

@@ -94,7 +94,6 @@ out_unlock:
 	mutex_unlock(&mst3367_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_ramtest);
 
 /*
  * M45. The connected camera visibly reacts to running the bring-up (its live
@@ -270,7 +269,6 @@ int mz0380_mst3367_watch(struct mz0380_dev *dev, unsigned int secs)
 	pr_info("%s: watch done%s\n", dev->name, ret ? " (I/O error)" : "");
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_watch);
 
 /*
  * M73: dump the receiver's OUTPUT stage.
@@ -383,7 +381,6 @@ void mz0380_mst3367_output_diag(struct mz0380_dev *dev, const char *tag)
 out:
 	mutex_unlock(&mst3367_lock);
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_output_diag);
 
 /*
  * M130: choose the CSC mode from the colour space the source is ACTUALLY
@@ -450,7 +447,6 @@ int mz0380_mst3367_refresh_colourspace(struct mz0380_dev *dev)
 		dev->name, b2_48);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_refresh_colourspace);
 
 void mz0380_mst3367_apply_csc_mode(struct mz0380_dev *dev)
 {
@@ -516,7 +512,6 @@ void mz0380_mst3367_apply_csc_mode(struct mz0380_dev *dev)
 out:
 	mutex_unlock(&mst3367_lock);
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_apply_csc_mode);
 
 void mz0380_mst3367_diag(struct mz0380_dev *dev, struct seq_file *m)
 {
@@ -696,4 +691,3 @@ void mz0380_mst3367_diag(struct mz0380_dev *dev, struct seq_file *m)
 out_unlock:
 	mutex_unlock(&mst3367_lock);
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_diag);

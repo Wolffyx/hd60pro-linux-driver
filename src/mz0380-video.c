@@ -12,13 +12,10 @@
 
 #include "mz0380-internal.h"
 
-#define MZ0380_DEFAULT_COLOR        128
-#define MZ0380_MAX_COLOR            255
 /* M171: buffers vb2's read() fileio path uses; reported by G/S_PARM. */
 #define MZ0380_READ_BUFFERS         2
 #define MZ0380_SIZEIMAGE_MIN        (256 * 1024)
 #define MZ0380_SIZEIMAGE_MAX        (4 * 1024 * 1024)
-#define MZ0380_CID_SC540_RECORD_MODE (V4L2_CID_USER_BASE + 0x10f0)
 
 enum mz0380_record_mode {
 	MZ0380_RECORD_MODE_VBR = 0,
@@ -57,23 +54,11 @@ static const char * const mz0380_input_names[MZ0380_INPUT_COUNT] = {
 	"SDI",
 };
 
+/* Names for /proc; the property itself is a BAR5 experiment, not a control. */
 static const char * const mz0380_record_mode_qmenu[] = {
 	"VBR",
 	"CBR",
 	"HBR",
-};
-
-static const struct v4l2_ctrl_ops mz0380_ctrl_ops;
-
-static const struct v4l2_ctrl_config mz0380_ctrl_record_mode = {
-	.ops = &mz0380_ctrl_ops,
-	.id = MZ0380_CID_SC540_RECORD_MODE,
-	.name = "SC540 Record Mode",
-	.type = V4L2_CTRL_TYPE_MENU,
-	.min = MZ0380_RECORD_MODE_VBR,
-	.max = MZ0380_RECORD_MODE_HBR,
-	.def = MZ0380_RECORD_MODE_CBR,
-	.qmenu = mz0380_record_mode_qmenu,
 };
 
 static const struct video_device mz0380_video_template = {
@@ -235,70 +220,53 @@ mz0380_find_interval(u32 width, u32 height, const struct v4l2_fract *wanted)
 	return mz0380_default_interval_for_size(width, height);
 }
 
-static u32 mz0380_sizeimage(const struct mz0380_capture_state *capture)
-{
-	u32 bitrate = max(capture->bitrate, capture->bitrate_peak);
-	u32 sizeimage = DIV_ROUND_UP(bitrate, 8);
-
-	sizeimage = clamp(sizeimage, (u32)MZ0380_SIZEIMAGE_MIN,
-			  (u32)MZ0380_SIZEIMAGE_MAX);
-
-	return sizeimage;
-}
-
 /*
- * With stream_nosg the card's fake-frame generator delivers raw NV12 (M36:
- * one 1920x1107x1.5 contiguous burst; the leading 1920x1080 is the picture),
- * captured by the polling loop in mz0380-dma.c - not H.264. The node
- * advertises whichever format the current mode actually produces.
- */
-/*
- * M111: the real path delivers RAW frames too, not H.264, whenever the
- * poll-drain is doing the delivering. buf0 receives exactly
- * 1920*1080*3/2 = 3110400 bytes of 4:2:0 - the card's own splash - and the
- * encoder never produces a bitstream for it. Advertising H.264 there would
- * hand userspace 3 MB of planar YUV labelled as a bytestream, and sizing the
- * plane from the bitrate (12 Mbit/8 = 1.5 MB) would make the drain reject
- * every frame as "does not fit vb2 plane" before it got that far.
+ * Everything below answers "what format would the node deliver for THIS
+ * request", taking the request as arguments rather than reading it back out of
+ * the device.
  *
- * So both the format and the plane size follow the same switch.
+ * M245: TRY_FMT used to answer by writing the request INTO the device -
+ * deliver_raw, raw_fourcc and capture - calling the helpers, and restoring the
+ * old values afterwards. The drain worker reads those same fields with no lock
+ * while it copies a frame, so a TRY_FMT from any process during a capture could
+ * make one frame take the wrong chroma layout (correct luma, green/magenta
+ * cast) or the H.264 branch. The window is microseconds, which is exactly what
+ * makes it look like an occasional hardware fault. V4L2 is explicit that
+ * TRY_FMT changes nothing; now it cannot.
  */
-static u32 mz0380_raw_frame_size(const struct mz0380_capture_state *capture)
-{
-	return capture->width * capture->height * 3 / 2;
-}
-
-u32 mz0380_current_sizeimage(struct mz0380_dev *dev)
+u32 mz0380_sizeimage_for(struct mz0380_dev *dev, bool raw, u32 width,
+			 u32 height)
 {
 	u32 size;
 
 	if (mz0380_raw_bank_probe)
 		return MZ0380_RAW_PROBE_FRAME_SIZE;
-	if (dev->deliver_raw)		/* M217/M218, before h264_probe */
-		return mz0380_raw_frame_bytes(dev);  /* M221: not always 1080p */
+	if (raw)		/* M217/M218, before h264_probe */
+		return mz0380_raw_frame_bytes_for(width, height); /* M221 */
 	if (mz0380_h264_probe)
 		return MZ0380_H264_SET_BUF_SIZE - 4096;
 	if (mz0380_stream_nosg)
 		return MZ0380_NOSG_NV12_SIZEIMAGE;
+
+	size = clamp_t(u32, DIV_ROUND_UP(dev->capture.enc_bitrate, 8),
+		       MZ0380_SIZEIMAGE_MIN, MZ0380_SIZEIMAGE_MAX);
+	/*
+	 * M111: the poll-drain delivers RAW frames - buf0 receives exactly
+	 * width*height*3/2 of 4:2:0, the card's own splash, and the encoder
+	 * never produces a bitstream for it - so the plane must hold one.
+	 */
 	if (mz0380_poll_drain_ms)
-		size = max(mz0380_raw_frame_size(&dev->capture),
-			   mz0380_sizeimage(&dev->capture));
-	else
-		size = mz0380_sizeimage(&dev->capture);
+		size = max(width * height * 3 / 2, size);
 
 	/*
 	 * M175: a declared frame expectation is also a plane requirement.
 	 *
 	 * expect_frame_bytes exists because the card does not always write
-	 * source-sized frames - tinyvenc8 writes 960x540, and fw=6 is
-	 * documented to switch the card's output format to YUY2, which at
-	 * 1080p is 4147200 bytes against this plane's 3110400. Without this
-	 * the drain would measure a complete frame and then reject it with
-	 * "does not fit vb2 plane", which is a different way to lose the same
-	 * frame - and a harder one to read, because it looks like a driver bug
-	 * rather than an expectation mismatch.
-	 *
-	 * Bounded by the DMA buffer, since nothing larger can arrive anyway.
+	 * source-sized frames - tinyvenc8 writes 960x540, and fw=6 switches the
+	 * card's output format to YUY2, which at 1080p is 4147200 bytes against
+	 * this plane's 3110400. Without this the drain would measure a complete
+	 * frame and then reject it as "does not fit vb2 plane". Bounded by the
+	 * DMA buffer, since nothing larger can arrive anyway.
 	 */
 	if (mz0380_expect_frame_bytes)
 		size = max_t(u32, size,
@@ -308,38 +276,30 @@ u32 mz0380_current_sizeimage(struct mz0380_dev *dev)
 	return size;
 }
 
+u32 mz0380_current_sizeimage(struct mz0380_dev *dev)
+{
+	return mz0380_sizeimage_for(dev, dev->deliver_raw, dev->capture.width,
+				    dev->capture.height);
+}
+
 /*
  * M168: ONE place decides the advertised fourcc, because three places used to
- * and they had drifted apart - ENUM_FMT said NV12 while ENUM_FRAMESIZES and
- * ENUM_FRAMEINTERVALS still tested for H.264 and so returned -EINVAL for the
- * very format the node had just enumerated. Every caller now asks here.
+ * and they had drifted apart.
  *
- * The poll-drain payload is planar I420 - Y, then a 960x540 U plane, then a
- * 960x540 V plane (M130, confirmed visually AND by correlation: the U/V-swapped
- * rendering gives the textbook red/blue swap, plain yuv420p does not). It was
- * advertised as NV12, which is the same byte count with the chroma
- * INTERLEAVED, so every V4L2 application - ffmpeg, GStreamer, OBS - rendered
- * the magenta/green interleave banding RE_FINDINGS describes. The frame was
- * always right; the label was wrong. V4L2_PIX_FMT_YUV420 is I420.
- *
- * The nosg fake-frame path keeps NV12: its layout was never confirmed either
- * way (different producer, different 1920x1107 geometry, flat logo content
- * where interleave banding would not show), so correcting it would be a guess
+ * The poll-drain payload is planar I420 (M130, confirmed visually AND by
+ * correlation), so V4L2_PIX_FMT_YUV420. The nosg fake-frame path keeps NV12:
+ * its layout was never confirmed either way, so correcting it would be a guess
  * rather than a measurement. It is a diagnostic path and defaults off.
+ *
+ * M217/M218: raw delivery runs WITH h264_probe - the encoder has to keep
+ * running for the card to produce raw at all (M210b) - so it is tested first.
  */
-u32 mz0380_current_pixelformat(struct mz0380_dev *dev)
+static u32 mz0380_pixelformat_for(bool raw, u32 raw_fourcc)
 {
 	if (mz0380_raw_bank_probe)
 		return V4L2_PIX_FMT_YUV420;
-	/*
-	 * M217/M218: raw delivery runs WITH h264_probe - the encoder has to
-	 * keep running for the card to produce raw at all (M210b) - so it has
-	 * to be tested first, or the node would advertise H.264 while
-	 * delivering I420. Which one is live is now a runtime choice (S_FMT),
-	 * not a module parameter; the parameter only seeds it.
-	 */
-	if (dev && dev->deliver_raw)
-		return dev->raw_fourcc ? dev->raw_fourcc : V4L2_PIX_FMT_YUV420;
+	if (raw)
+		return raw_fourcc ? raw_fourcc : V4L2_PIX_FMT_YUV420;
 	if (mz0380_h264_probe)
 		return V4L2_PIX_FMT_H264;
 	if (mz0380_stream_nosg)
@@ -349,69 +309,67 @@ u32 mz0380_current_pixelformat(struct mz0380_dev *dev)
 	return V4L2_PIX_FMT_H264;
 }
 
-static void mz0380_fill_pix_format(struct mz0380_dev *dev,
-				   struct v4l2_pix_format *pix)
+u32 mz0380_current_pixelformat(struct mz0380_dev *dev)
+{
+	if (!dev)
+		return mz0380_pixelformat_for(false, 0);
+	return mz0380_pixelformat_for(dev->deliver_raw, dev->raw_fourcc);
+}
+
+static void mz0380_fill_pix_format_for(struct mz0380_dev *dev,
+				       struct v4l2_pix_format *pix, bool raw,
+				       u32 raw_fourcc, u32 width, u32 height)
 {
 	memset(pix, 0, sizeof(*pix));
 
-	pix->pixelformat = mz0380_current_pixelformat(dev);
+	pix->pixelformat = mz0380_pixelformat_for(raw, raw_fourcc);
 
 	if (mz0380_stream_nosg) {
 		pix->width = MZ0380_NOSG_NV12_WIDTH;
 		pix->height = MZ0380_NOSG_NV12_HEIGHT;
 		pix->bytesperline = MZ0380_NOSG_NV12_WIDTH;
-	} else if (mz0380_raw_bank_probe || dev->deliver_raw ||
-		   mz0380_poll_drain_ms) {
+	} else if (mz0380_raw_bank_probe || raw || mz0380_poll_drain_ms) {
 		/* M111: real geometry, raw payload. */
-		pix->width = dev->capture.width;
-		pix->height = dev->capture.height;
-		pix->bytesperline = dev->capture.width;
+		pix->width = width;
+		pix->height = height;
+		pix->bytesperline = width;
 	} else {
-		pix->width = dev->capture.width;
-		pix->height = dev->capture.height;
+		pix->width = width;
+		pix->height = height;
 		pix->bytesperline = 0;
 	}
 
 	pix->field = mz0380_current_field(dev);
-	pix->sizeimage = mz0380_current_sizeimage(dev);
-	pix->colorspace = V4L2_COLORSPACE_REC709;
-	pix->ycbcr_enc = V4L2_YCBCR_ENC_709;
+	pix->sizeimage = mz0380_sizeimage_for(dev, raw, width, height);
 	/*
-	 * M234: report the range the payload actually uses.
-	 *
-	 * This said LIM_RANGE for every format. A 600-frame raw capture
-	 * measured luma up to 254 with 4.2% of sampled pixels above 235, which
-	 * limited-range content cannot contain, and the card writes its own
-	 * black as 0-1 rather than 16. Declaring full-range data as limited
-	 * makes every consumer expand 16..235 to 0..255 a second time, which
-	 * shows as a brighter and harsher picture than the same card produces
-	 * on Windows.
-	 *
-	 * Raw only. The H.264 bitstream carries its own VUI, so what this node
-	 * claims for it is not what a decoder obeys, and changing it could
-	 * mislead a consumer that is currently correct.
+	 * M245: SD modes are BT.601, not BT.709. The mode table offers 720x480
+	 * and 720x576, and HDMI sources send those with 601 colorimetry.
 	 */
-	if (mz0380_raw_full_range &&
-	    pix->pixelformat == V4L2_PIX_FMT_YUV420)
+	if (pix->height && pix->height <= 576) {
+		pix->colorspace = V4L2_COLORSPACE_SMPTE170M;
+		pix->ycbcr_enc = V4L2_YCBCR_ENC_601;
+	} else {
+		pix->colorspace = V4L2_COLORSPACE_REC709;
+		pix->ycbcr_enc = V4L2_YCBCR_ENC_709;
+	}
+	/*
+	 * M234 (RETRACTED as a default, kept as an operator switch): the
+	 * H.264 bitstream carries its own VUI, so only raw is relabelled. All
+	 * three raw layouts carry the same bytes, so all three get the same
+	 * label - M245 found NV12 and YV12 still claiming limited range.
+	 */
+	if (mz0380_raw_full_range && mz0380_is_raw_fourcc(pix->pixelformat))
 		pix->quantization = V4L2_QUANTIZATION_FULL_RANGE;
 	else
 		pix->quantization = V4L2_QUANTIZATION_LIM_RANGE;
 	pix->xfer_func = V4L2_XFER_FUNC_709;
 }
 
-static void mz0380_apply_try_fmt(struct mz0380_dev *dev, struct v4l2_format *f)
+static void mz0380_fill_pix_format(struct mz0380_dev *dev,
+				   struct v4l2_pix_format *pix)
 {
-	const struct mz0380_mode *mode;
-	const struct v4l2_fract *interval;
-
-	mode = mz0380_find_mode(f->fmt.pix.width, f->fmt.pix.height);
-	interval = mz0380_find_interval(mode->width, mode->height,
-					&dev->capture.timeperframe);
-
-	dev->capture.width = mode->width;
-	dev->capture.height = mode->height;
-	dev->capture.timeperframe = *interval;
-	mz0380_fill_pix_format(dev, &f->fmt.pix);
+	mz0380_fill_pix_format_for(dev, pix, dev->deliver_raw, dev->raw_fourcc,
+				   dev->capture.width, dev->capture.height);
 }
 
 static int mz0380_querycap(struct file *file, void *priv,
@@ -565,11 +523,38 @@ static int mz0380_g_fmt_vid_cap(struct file *file, void *priv,
 	return 0;
 }
 
+/*
+ * Resolve a TRY_FMT/S_FMT request to the format the node would deliver,
+ * without touching the device: the source geometry wins (M223, there is no
+ * scaler), and the pixelformat decides raw versus H.264 when the raw banks
+ * exist (M218).
+ */
+static const struct mz0380_mode *
+mz0380_resolve_fmt(struct mz0380_dev *dev, const struct v4l2_pix_format *pix,
+		   bool *raw, u32 *raw_fourcc)
+{
+	u32 width = pix->width, height = pix->height;
+
+	mz0380_clamp_to_source(dev, &width, &height);
+
+	*raw = dev->deliver_raw;
+	*raw_fourcc = dev->raw_fourcc;
+	if (dev->raw_capable) {
+		*raw = mz0380_is_raw_fourcc(pix->pixelformat);
+		if (*raw)
+			*raw_fourcc = pix->pixelformat;
+	}
+
+	return mz0380_find_mode(width, height);
+}
+
 static int mz0380_try_fmt_vid_cap(struct file *file, void *priv,
 				  struct v4l2_format *f)
 {
 	struct mz0380_dev *dev = video_drvdata(file);
-	struct mz0380_capture_state saved = dev->capture;
+	const struct mz0380_mode *mode;
+	u32 raw_fourcc;
+	bool raw;
 
 	if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
@@ -580,31 +565,10 @@ static int mz0380_try_fmt_vid_cap(struct file *file, void *priv,
 		return 0;
 	}
 
-	/*
-	 * M218: the pixelformat IS negotiable now, when the raw banks exist.
-	 * Anything else still falls back to what the driver would deliver -
-	 * V4L2 requires TRY_FMT to return a workable format, never an error.
-	 */
-	mz0380_clamp_to_source(dev, &f->fmt.pix.width, &f->fmt.pix.height);
-
-	if (dev->raw_capable) {
-		bool want_raw = mz0380_is_raw_fourcc(f->fmt.pix.pixelformat);
-		bool saved_raw = dev->deliver_raw;
-		u32 saved_fourcc = dev->raw_fourcc;
-
-		dev->deliver_raw = want_raw;
-		if (want_raw)
-			dev->raw_fourcc = f->fmt.pix.pixelformat;
-		mz0380_apply_try_fmt(dev, f);
-		dev->deliver_raw = saved_raw;
-		dev->raw_fourcc = saved_fourcc;
-		dev->capture = saved;
-		return 0;
-	}
-
-	mz0380_apply_try_fmt(dev, f);
-	dev->capture = saved;
-
+	/* M245: computed, never written into dev - see mz0380_sizeimage_for. */
+	mode = mz0380_resolve_fmt(dev, &f->fmt.pix, &raw, &raw_fourcc);
+	mz0380_fill_pix_format_for(dev, &f->fmt.pix, raw, raw_fourcc,
+				   mode->width, mode->height);
 	return 0;
 }
 
@@ -614,6 +578,8 @@ static int mz0380_s_fmt_vid_cap(struct file *file, void *priv,
 	struct mz0380_dev *dev = video_drvdata(file);
 	const struct mz0380_mode *mode;
 	const struct v4l2_fract *interval;
+	u32 raw_fourcc;
+	bool raw, changed;
 
 	if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
@@ -624,60 +590,60 @@ static int mz0380_s_fmt_vid_cap(struct file *file, void *priv,
 		return 0;
 	}
 
-	/*
-	 * M218: commit the requested delivery format. Changing it while buffers
-	 * are queued would hand an application a plane sized for the other
-	 * format, so refuse rather than surprise it - this is what every V4L2
-	 * driver does and what applications already expect.
-	 */
-	mz0380_clamp_to_source(dev, &f->fmt.pix.width, &f->fmt.pix.height);
+	mode = mz0380_resolve_fmt(dev, &f->fmt.pix, &raw, &raw_fourcc);
 
-	if (dev->raw_capable) {
-		bool want_raw = mz0380_is_raw_fourcc(f->fmt.pix.pixelformat);
+	/*
+	 * M245: no format change of any kind while buffers exist.
+	 *
+	 * Only the raw/H.264 switch used to be refused. A switch between raw
+	 * layouts was committed on purpose mid-stream (M241), and a geometry
+	 * change was never checked at all - so a SECOND process could S_FMT a
+	 * node another application was streaming from. The layout switch then
+	 * re-ordered every later frame into buffers the owner had negotiated as
+	 * a different layout, and a geometry change shrank the frame size the
+	 * drain copies (mz0380_raw_frame_bytes reads capture.width) under
+	 * buffers sized for the old one. V4L2 says -EBUSY, and applications
+	 * already handle it.
+	 */
+	changed = raw != dev->deliver_raw ||
+		  (raw && raw_fourcc != dev->raw_fourcc) ||
+		  mode->width != dev->capture.width ||
+		  mode->height != dev->capture.height;
+	if (changed && vb2_is_busy(&dev->vb_queue))
+		return -EBUSY;
+
+	if (raw != dev->deliver_raw) {
+		dev->deliver_raw = raw;
 
 		/*
-		 * M241: a switch BETWEEN raw layouts needs none of the
-		 * pipeline work below - the card keeps writing I420 either
-		 * way and only the copy re-orders - so record it and fall
-		 * through without disturbing a running stream.
+		 * M221: the card has to be told, and a persistent pipeline will
+		 * not tell it.
+		 *
+		 * post_mask bit 0 - what makes the card write whole frames
+		 * instead of 16-byte stubs - is sent by mz0380_stream_post_proc()
+		 * during stream start. Under persistent_h264 a second STREAMON on
+		 * a running pipeline attaches VB2 and nothing else, so switching
+		 * H.264 -> I420 after streaming once would leave the card in stub
+		 * mode. Flag the pipeline for replacement so the next attachment
+		 * restarts it and re-sends the command.
 		 */
-		if (want_raw)
-			dev->raw_fourcc = f->fmt.pix.pixelformat;
-
-		if (want_raw != dev->deliver_raw) {
-			if (vb2_is_busy(&dev->vb_queue))
-				return -EBUSY;
-			dev->deliver_raw = want_raw;
-
-			/*
-			 * M221: the card has to be told, and a persistent
-			 * pipeline will not tell it.
-			 *
-			 * post_mask bit 0 - what makes the card write whole
-			 * frames instead of 16-byte stubs - is sent by
-			 * mz0380_stream_post_proc() during stream start. Under
-			 * persistent_h264 a second STREAMON on a running
-			 * pipeline attaches VB2 and nothing else, so switching
-			 * H.264 -> I420 after streaming once would leave the
-			 * card in stub mode and deliver nothing at all. Flag
-			 * the pipeline for replacement so the next attachment
-			 * restarts it and re-sends the command.
-			 */
-			if (READ_ONCE(dev->pipeline_running))
-				WRITE_ONCE(dev->pipeline_reconfigure_pending,
-					   true);
-			pr_info("%s: delivery format set to %s%s\n", dev->name,
-				want_raw ? "raw (uncompressed)" : "H.264",
-				READ_ONCE(dev->pipeline_running) ?
-					"; encoder pipeline will be replaced at the next attachment" :
-					"");
-		}
+		if (READ_ONCE(dev->pipeline_running))
+			WRITE_ONCE(dev->pipeline_reconfigure_pending, true);
+		dev_info(&dev->pci->dev, "delivery format set to %s%s\n",
+			 raw ? "raw (uncompressed)" : "H.264",
+			 READ_ONCE(dev->pipeline_running) ?
+				"; encoder pipeline will be replaced at the next attachment" :
+				"");
 	}
+	/*
+	 * M241: a switch BETWEEN raw layouts needs no pipeline work - the card
+	 * keeps writing I420 and only the copy re-orders.
+	 */
+	if (raw)
+		dev->raw_fourcc = raw_fourcc;
 
-	mode = mz0380_find_mode(f->fmt.pix.width, f->fmt.pix.height);
 	interval = mz0380_find_interval(mode->width, mode->height,
 					&dev->capture.timeperframe);
-
 	dev->capture.width = mode->width;
 	dev->capture.height = mode->height;
 	dev->capture.timeperframe = *interval;
@@ -820,7 +786,13 @@ static int mz0380_enum_input(struct file *file, void *priv,
 	unsigned int index = inp->index;
 	bool locked = false;
 
-	if (index >= ARRAY_SIZE(mz0380_input_names))
+	/*
+	 * M245: one input. The HD60 Pro has a single HDMI connector, and the
+	 * other four names are the SDK's generic front ends. Listing them put
+	 * an input menu in every application whose other entries route the VIC
+	 * to a front end this board does not have (see mz0380_card_setup).
+	 */
+	if (index != 0)
 		return -EINVAL;
 
 	if (index == dev->capture.input) {
@@ -857,6 +829,8 @@ static int mz0380_s_input(struct file *file, void *priv, unsigned int i)
 {
 	struct mz0380_dev *dev = video_drvdata(file);
 
+	if (i != 0)
+		return -EINVAL;
 	return mz0380_request_input_select(dev, i, "v4l2");
 }
 
@@ -944,75 +918,76 @@ static int mz0380_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 		container_of(ctrl->handler, struct mz0380_dev, ctrl_handler);
 
 	switch (ctrl->id) {
-	case V4L2_CID_MPEG_VIDEO_BITRATE:
-		ctrl->val = dev->capture.bitrate;
+	case V4L2_CID_DV_RX_POWER_PRESENT: {
+		bool locked;
+
+		/*
+		 * M245: the receiver's lock, as the closest measurable stand-in.
+		 * No +5V or cable-detect bit is known on the MST3367 - R55 reads
+		 * 0x83/0x03 with nothing plugged in and with a source that is
+		 * powered but not transmitting alike - so this reads 1 when the
+		 * receiver is locked to a source and 0 otherwise.
+		 *
+		 * Live when nothing is capturing: the cached flag is only as new
+		 * as the last query, and after a load or rebind it read 0 with a
+		 * locked source until something else asked. One R55 read is
+		 * cheap. While a stream or pipeline runs the cached state is
+		 * used instead, the same rule ENUM_INPUT follows (M74: receiver
+		 * traffic during a capture can perturb it).
+		 */
+		if (READ_ONCE(dev->streaming) || READ_ONCE(dev->pipeline_running) ||
+		    mz0380_mst3367_read_lock(dev, &locked, false))
+			locked = READ_ONCE(dev->signal_locked);
+		ctrl->val = locked ? 1 : 0;
 		return 0;
-	case V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY:
-		ctrl->val = dev->capture.quality;
-		return 0;
-	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
-		ctrl->val = dev->capture.gop_size;
-		return 0;
-	case V4L2_CID_MPEG_VIDEO_B_FRAMES:
-		ctrl->val = dev->capture.b_frames;
-		return 0;
-	case MZ0380_CID_SC540_RECORD_MODE:
-		ctrl->val = dev->capture.record_mode;
-		return 0;
+	}
 	default:
 		return -EINVAL;
 	}
 }
 
+/*
+ * M245: the controls that exist are the ones that do something.
+ *
+ * Bitrate, quality, GOP, B-frames and record mode used to be written straight
+ * into BAR5 registers whose meaning on this card was never established (the
+ * property-experiment path), and SET_ENC_PARAMS then ignored them in favour of
+ * the Windows constants. Brightness, contrast, hue, saturation, sharpness,
+ * profile, level and peak bitrate were stored and never read. v4l2-compliance
+ * exercises every control, so each run wrote arbitrary values into BAR5.
+ *
+ * What is left is bitrate and GOP, which now reach the encoder: they are sent
+ * in SET_ENC_PARAMS for the main stream when a pipeline starts. They are
+ * grabbed while streaming, because the running encoder cannot re-read them.
+ * Between sessions a persistent pipeline is still running with the old values,
+ * so a change there schedules its replacement at the next attachment - the same
+ * mechanism a raw/H.264 switch uses, and at the same cost of one encoder spawn.
+ */
 static int mz0380_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct mz0380_dev *dev =
 		container_of(ctrl->handler, struct mz0380_dev, ctrl_handler);
+	u32 *field;
 
 	switch (ctrl->id) {
-	case MZ0380_CID_SC540_RECORD_MODE:
-		return mz0380_request_record_mode_locked(dev, ctrl->val,
-							 "v4l2-ctrl");
 	case V4L2_CID_MPEG_VIDEO_BITRATE:
-		return mz0380_request_bitrate_locked(dev, ctrl->val,
-						     "v4l2-ctrl");
-	case V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY:
-		return mz0380_request_quality_locked(dev, ctrl->val,
-						     "v4l2-ctrl");
-	case V4L2_CID_MPEG_VIDEO_BITRATE_PEAK:
-		dev->capture.bitrate_peak = ctrl->val;
+		field = &dev->capture.enc_bitrate;
 		break;
 	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
-		return mz0380_request_gop_locked(dev, ctrl->val,
-						 "v4l2-ctrl");
-	case V4L2_CID_MPEG_VIDEO_B_FRAMES:
-		return mz0380_request_b_frames_locked(dev, ctrl->val,
-						      "v4l2-ctrl");
-	case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
-		dev->capture.h264_profile = ctrl->val;
-		break;
-	case V4L2_CID_MPEG_VIDEO_H264_LEVEL:
-		dev->capture.h264_level = ctrl->val;
-		break;
-	case V4L2_CID_BRIGHTNESS:
-		dev->capture.brightness = ctrl->val;
-		break;
-	case V4L2_CID_CONTRAST:
-		dev->capture.contrast = ctrl->val;
-		break;
-	case V4L2_CID_HUE:
-		dev->capture.hue = ctrl->val;
-		break;
-	case V4L2_CID_SATURATION:
-		dev->capture.saturation = ctrl->val;
-		break;
-	case V4L2_CID_SHARPNESS:
-		dev->capture.sharpness = ctrl->val;
+		field = &dev->capture.enc_gop;
 		break;
 	default:
 		return -EINVAL;
 	}
 
+	if (*field != (u32)ctrl->val && READ_ONCE(dev->pipeline_running) &&
+	    !READ_ONCE(dev->pipeline_reconfigure_pending)) {
+		WRITE_ONCE(dev->pipeline_reconfigure_pending, true);
+		dev_info(&dev->pci->dev,
+			 "%s changed; the encoder pipeline will be replaced at the next attachment (one encoder spawn)\n",
+			 ctrl->name);
+	}
+	*field = ctrl->val;
 	return 0;
 }
 
@@ -1020,6 +995,20 @@ static const struct v4l2_ctrl_ops mz0380_ctrl_ops = {
 	.g_volatile_ctrl = mz0380_g_volatile_ctrl,
 	.s_ctrl = mz0380_s_ctrl,
 };
+
+/*
+ * Hold the encoder controls for a streaming session. Safe to call from any
+ * sleeping context; does nothing before the node is registered.
+ */
+void mz0380_encoder_ctrls_grab(struct mz0380_dev *dev, bool grabbed)
+{
+	if (!dev->ctrl_handler_initialized)
+		return;
+	if (dev->bitrate_ctrl)
+		v4l2_ctrl_grab(dev->bitrate_ctrl, grabbed);
+	if (dev->gop_ctrl)
+		v4l2_ctrl_grab(dev->gop_ctrl, grabbed);
+}
 
 /* ===== ioctl table & file ops ======================================== */
 
@@ -1071,80 +1060,34 @@ static const struct v4l2_file_operations mz0380_video_fops = {
 
 static int mz0380_ctrls_init(struct mz0380_dev *dev)
 {
-	v4l2_ctrl_handler_init(&dev->ctrl_handler, 14);
+	struct v4l2_ctrl *power;
+
+	v4l2_ctrl_handler_init(&dev->ctrl_handler, 3);
 	dev->ctrl_handler.lock = &dev->ctrl_lock;
 	dev->ctrl_handler_initialized = true;
 
-	dev->record_mode_ctrl =
-		v4l2_ctrl_new_custom(&dev->ctrl_handler,
-				     &mz0380_ctrl_record_mode, NULL);
-	if (dev->record_mode_ctrl)
-		dev->record_mode_ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
 	dev->bitrate_ctrl =
 		v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
 				  V4L2_CID_MPEG_VIDEO_BITRATE,
 				  MZ0380_MIN_BITRATE, MZ0380_MAX_BITRATE,
-				  256 * 1024, MZ0380_DEFAULT_BITRATE);
-	if (dev->bitrate_ctrl)
-		dev->bitrate_ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
-	dev->quality_ctrl =
-		v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
-				  V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY,
-				  MZ0380_MIN_QUALITY, MZ0380_MAX_QUALITY,
-				  1, MZ0380_DEFAULT_QUALITY);
-	if (dev->quality_ctrl)
-		dev->quality_ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
-	v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
-			  V4L2_CID_MPEG_VIDEO_BITRATE_PEAK,
-			  MZ0380_MIN_BITRATE, MZ0380_MAX_BITRATE,
-			  256 * 1024, MZ0380_DEFAULT_BITRATE);
+				  256 * 1024, MZ0380_ENC_DEFAULT_BITRATE);
 	dev->gop_ctrl =
 		v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
 				  V4L2_CID_MPEG_VIDEO_GOP_SIZE,
-				  MZ0380_MIN_GOP, MZ0380_MAX_GOP, 1,
-				  MZ0380_DEFAULT_GOP);
-	if (dev->gop_ctrl)
-		dev->gop_ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
-	dev->b_frames_ctrl =
-		v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
-				  V4L2_CID_MPEG_VIDEO_B_FRAMES,
-				  0, MZ0380_MAX_B_FRAMES, 1,
-				  MZ0380_DEFAULT_B_FRAMES);
-	if (dev->b_frames_ctrl)
-		dev->b_frames_ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
-	v4l2_ctrl_new_std_menu(&dev->ctrl_handler, &mz0380_ctrl_ops,
-			       V4L2_CID_MPEG_VIDEO_H264_PROFILE,
-			       V4L2_MPEG_VIDEO_H264_PROFILE_HIGH, 0,
-			       V4L2_MPEG_VIDEO_H264_PROFILE_HIGH);
-	v4l2_ctrl_new_std_menu(&dev->ctrl_handler, &mz0380_ctrl_ops,
-			       V4L2_CID_MPEG_VIDEO_H264_LEVEL,
-			       V4L2_MPEG_VIDEO_H264_LEVEL_4_2, 0,
-			       V4L2_MPEG_VIDEO_H264_LEVEL_4_2);
-	v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
-			  V4L2_CID_BRIGHTNESS, 0, MZ0380_MAX_COLOR, 1,
-			  MZ0380_DEFAULT_COLOR);
-	v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
-			  V4L2_CID_CONTRAST, 0, MZ0380_MAX_COLOR, 1,
-			  MZ0380_DEFAULT_COLOR);
-	v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
-			  V4L2_CID_HUE, 0, MZ0380_MAX_COLOR, 1,
-			  MZ0380_DEFAULT_COLOR);
-	v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
-			  V4L2_CID_SATURATION, 0, MZ0380_MAX_COLOR, 1,
-			  MZ0380_DEFAULT_COLOR);
-	v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
-			  V4L2_CID_SHARPNESS, 0, MZ0380_MAX_COLOR, 1,
-			  MZ0380_DEFAULT_COLOR);
+				  MZ0380_MIN_GOP, MZ0380_ENC_MAX_GOP, 1,
+				  MZ0380_ENC_DEFAULT_GOP);
+	/* One input, so the bitmask has one bit. */
+	power = v4l2_ctrl_new_std(&dev->ctrl_handler, &mz0380_ctrl_ops,
+				  V4L2_CID_DV_RX_POWER_PRESENT, 0, 1, 0, 0);
+	if (power)
+		power->flags |= V4L2_CTRL_FLAG_VOLATILE;
 
 	if (dev->ctrl_handler.error) {
 		int err = dev->ctrl_handler.error;
 
 		v4l2_ctrl_handler_free(&dev->ctrl_handler);
 		dev->bitrate_ctrl = NULL;
-		dev->quality_ctrl = NULL;
 		dev->gop_ctrl = NULL;
-		dev->b_frames_ctrl = NULL;
-		dev->record_mode_ctrl = NULL;
 		dev->ctrl_handler_initialized = false;
 		return err;
 	}
@@ -1172,17 +1115,11 @@ void mz0380_capture_state_init(struct mz0380_dev *dev)
 	dev->capture.record_mode = MZ0380_RECORD_MODE_CBR;
 	dev->capture.bitrate = MZ0380_DEFAULT_BITRATE;
 	dev->capture.quality = MZ0380_DEFAULT_QUALITY;
-	dev->capture.bitrate_peak = MZ0380_DEFAULT_BITRATE;
 	dev->capture.gop_size = MZ0380_DEFAULT_GOP;
 	dev->capture.qp_step = MZ0380_DEFAULT_QP_STEP;
 	dev->capture.b_frames = MZ0380_DEFAULT_B_FRAMES;
-	dev->capture.h264_profile = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH;
-	dev->capture.h264_level = V4L2_MPEG_VIDEO_H264_LEVEL_4_2;
-	dev->capture.brightness = MZ0380_DEFAULT_COLOR;
-	dev->capture.contrast = MZ0380_DEFAULT_COLOR;
-	dev->capture.hue = MZ0380_DEFAULT_COLOR;
-	dev->capture.saturation = MZ0380_DEFAULT_COLOR;
-	dev->capture.sharpness = MZ0380_DEFAULT_COLOR;
+	dev->capture.enc_bitrate = MZ0380_ENC_DEFAULT_BITRATE;
+	dev->capture.enc_gop = MZ0380_ENC_DEFAULT_GOP;
 }
 
 static int mz0380_vb2_init(struct mz0380_dev *dev)
@@ -1196,12 +1133,52 @@ static int mz0380_vb2_init(struct mz0380_dev *dev)
 	q->ops = &mz0380_qops;
 	q->mem_ops = &vb2_vmalloc_memops;
 	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-	q->lock = &dev->queue_lock;
+	/*
+	 * M245: one mutex for the queue and every other ioctl.
+	 *
+	 * They were separate, so S_FMT (vdev.lock) could pass its
+	 * vb2_is_busy() test while REQBUFS on another file handle (q->lock)
+	 * allocated buffers at the old size, and STREAMON wrote dev->capture
+	 * under a lock S_DV_TIMINGS and S_FMT did not hold. Nothing here needs
+	 * them apart: the ioctls that talk to the receiver already refuse to
+	 * while streaming, and vb2 drops the lock while DQBUF waits.
+	 */
+	q->lock = &dev->lock;
 	q->gfp_flags = GFP_KERNEL;
 	q->min_queued_buffers = 2;
 	q->dev = &dev->pci->dev;
 
 	return vb2_queue_init(q);
+}
+
+/*
+ * M245: the device struct lives until the last file handle closes.
+ *
+ * It embeds the video_device, and remove used to kfree() it with the node's
+ * release set to video_device_release_empty. rmmod cannot reach that while a
+ * handle is open - the module refcount holds it - but PCI unbind, hot removal
+ * and AER can: the handle's close then ran vb2_fop_release and the fh teardown
+ * against freed memory. The v4l2_device refcount already counts exactly the
+ * right users (one for registration, one per registered node), so the struct is
+ * freed from its release callback instead.
+ */
+static void mz0380_v4l2_release(struct v4l2_device *v4l2_dev)
+{
+	struct mz0380_dev *dev =
+		container_of(v4l2_dev, struct mz0380_dev, v4l2_dev);
+
+	if (dev->ctrl_handler_initialized)
+		v4l2_ctrl_handler_free(&dev->ctrl_handler);
+	kfree(dev);
+}
+
+/* Drop remove's reference: frees now, or at the last close of the node. */
+void mz0380_dev_put(struct mz0380_dev *dev)
+{
+	if (dev->v4l2_dev.release)
+		v4l2_device_put(&dev->v4l2_dev);
+	else
+		kfree(dev);
 }
 
 int mz0380_video_register(struct mz0380_dev *dev)
@@ -1237,23 +1214,22 @@ int mz0380_video_register(struct mz0380_dev *dev)
 	dev->vdev.dev_parent = &dev->pci->dev;
 	/*
 	 * M240: the node name is what applications list, so it should name the
-	 * device, not one of the formats it can produce. "mz0380 H.264" made a
-	 * card that captures uncompressed video look like a codec node.
+	 * device, not one of the formats it can produce.
 	 */
 	strscpy(dev->vdev.name, "HD60 Pro HDMI capture", sizeof(dev->vdev.name));
 	video_set_drvdata(&dev->vdev, dev);
 
-	err = video_register_device(&dev->vdev,
-				    VFL_TYPE_VIDEO, -1);
+	err = video_register_device(&dev->vdev, VFL_TYPE_VIDEO, -1);
 	if (err)
 		goto fail_ctrls;
 
 	dev->video_registered = true;
+	/* From here the struct is refcounted - see mz0380_v4l2_release. */
+	dev->v4l2_dev.release = mz0380_v4l2_release;
 
-	printk(KERN_INFO
-	       "%s: registered %s (H.264 capture, streaming=%s)\n",
-	       dev->name, video_device_node_name(&dev->vdev),
-	       dev->dma_armed ? "armed" : "disarmed");
+	dev_info(&dev->pci->dev, "registered %s (streaming=%s)\n",
+		 video_device_node_name(&dev->vdev),
+		 dev->dma_armed ? "armed" : "disarmed");
 
 	return 0;
 
@@ -1261,10 +1237,7 @@ fail_ctrls:
 	if (dev->ctrl_handler_initialized) {
 		v4l2_ctrl_handler_free(&dev->ctrl_handler);
 		dev->bitrate_ctrl = NULL;
-		dev->quality_ctrl = NULL;
 		dev->gop_ctrl = NULL;
-		dev->b_frames_ctrl = NULL;
-		dev->record_mode_ctrl = NULL;
 		dev->ctrl_handler_initialized = false;
 	}
 fail_v4l2:
@@ -1278,22 +1251,28 @@ fail_v4l2:
 void mz0380_video_unregister(struct mz0380_dev *dev)
 {
 	if (dev->video_registered) {
-		video_unregister_device(&dev->vdev);
+		/*
+		 * M245: stops a running stream and releases the queue NOW,
+		 * while the hardware is still mapped, so a handle that stays
+		 * open past remove finds no queue left to stop on close.
+		 */
+		vb2_video_unregister_device(&dev->vdev);
 		dev->video_registered = false;
-	}
-
-	if (dev->ctrl_handler_initialized) {
-		v4l2_ctrl_handler_free(&dev->ctrl_handler);
-		dev->bitrate_ctrl = NULL;
-		dev->quality_ctrl = NULL;
-		dev->gop_ctrl = NULL;
-		dev->b_frames_ctrl = NULL;
-		dev->record_mode_ctrl = NULL;
-		dev->ctrl_handler_initialized = false;
 	}
 
 	if (dev->v4l2_registered) {
 		v4l2_device_unregister(&dev->v4l2_dev);
 		dev->v4l2_registered = false;
+	}
+
+	/*
+	 * Open handles can still take control events, so a refcounted device
+	 * frees its handler in mz0380_v4l2_release instead.
+	 */
+	if (!dev->v4l2_dev.release && dev->ctrl_handler_initialized) {
+		v4l2_ctrl_handler_free(&dev->ctrl_handler);
+		dev->bitrate_ctrl = NULL;
+		dev->gop_ctrl = NULL;
+		dev->ctrl_handler_initialized = false;
 	}
 }

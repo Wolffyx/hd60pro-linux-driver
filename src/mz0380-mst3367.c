@@ -769,7 +769,6 @@ int mz0380_mst3367_wscan(struct mz0380_dev *dev)
 		dev->name);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_wscan);
 
 int mz0380_mst3367_hpd_pulse(struct mz0380_dev *dev, unsigned int count,
 			     unsigned int gap_ms)
@@ -798,7 +797,6 @@ int mz0380_mst3367_hpd_pulse(struct mz0380_dev *dev, unsigned int count,
 	mutex_unlock(&mst3367_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_hpd_pulse);
 
 int mz0380_mst3367_reload_edid(struct mz0380_dev *dev)
 {
@@ -826,7 +824,6 @@ out:
 	mutex_unlock(&mst3367_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_reload_edid);
 
 int mz0380_mst3367_bringup(struct mz0380_dev *dev)
 {
@@ -933,4 +930,3 @@ out:
 	mutex_unlock(&mst3367_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_bringup);

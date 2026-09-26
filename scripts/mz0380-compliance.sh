@@ -9,9 +9,10 @@
 # readbuffers and DV-timings-contract defects and took it to 142/6. M172 fixes
 # the last six.
 #
-# The 5 remaining warnings are V4L2_CID_DV_RX_POWER_PRESENT, one per input.
-# That control is an ADDITION - the driver has the information and does not
-# export it - not a correction, so it is deliberately still a warning.
+# M245 added V4L2_CID_DV_RX_POWER_PRESENT (it reports the receiver's lock) and
+# cut the input list to the one HDMI connector, so the five POWER_PRESENT
+# warnings - one per advertised input - should be gone. It also removed the
+# controls that did nothing, so the test count may differ from 148.
 set -u
 cd "$(dirname "$0")/.."
 

@@ -517,11 +517,10 @@ static bool mz0380_sync_in_range(struct mz0380_dev *dev, const char *what,
 	if (val >= min && val <= max)
 		return true;
 
-	printk(KERN_WARNING
-	       "%s: %s field returned %u (raw=%08x), outside the V4L2 range [%u..%u] - keeping the cached value; the register is unwritten, not zero%s%s\n",
-	       dev->name, what, val, raw_word, min, max,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_warn("%s: %s field returned %u (raw=%08x), outside the V4L2 range [%u..%u] - keeping the cached value; the register is unwritten, not zero%s%s\n",
+		dev->name, what, val, raw_word, min, max,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 	return false;
 }
 
@@ -540,16 +539,14 @@ bool mz0380_sync_candidate_bitrate(struct mz0380_dev *dev,
 		return false;
 
 	dev->capture.bitrate = bitrate;
-	printk(KERN_INFO
-	       "%s: synced cached bitrate from candidate BAR5 field = %u (raw=%08x)%s%s\n",
-	       dev->name, bitrate, raw_word,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached bitrate from candidate BAR5 field = %u (raw=%08x)%s%s\n",
+		dev->name, bitrate, raw_word,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	if (bitrate < MZ0380_MIN_BITRATE || bitrate > MZ0380_MAX_BITRATE)
-		printk(KERN_WARNING
-		       "%s: candidate bitrate field is outside current V4L2 range [%u..%u]\n",
-		       dev->name, MZ0380_MIN_BITRATE, MZ0380_MAX_BITRATE);
+		pr_warn("%s: candidate bitrate field is outside current V4L2 range [%u..%u]\n",
+			dev->name, MZ0380_MIN_BITRATE, MZ0380_MAX_BITRATE);
 
 	return true;
 }
@@ -568,16 +565,14 @@ bool mz0380_sync_hw_bitrate(struct mz0380_dev *dev, const char *reason)
 		return false;
 
 	dev->capture.bitrate = bitrate;
-	printk(KERN_INFO
-	       "%s: synced cached bitrate from BAR5[0x%04x] = %u (raw=%08x)%s%s\n",
-	       dev->name, MZ0380_BITRATE_HW_REG, bitrate, raw_word,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached bitrate from BAR5[0x%04x] = %u (raw=%08x)%s%s\n",
+		dev->name, MZ0380_BITRATE_HW_REG, bitrate, raw_word,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	if (bitrate < MZ0380_MIN_BITRATE || bitrate > MZ0380_MAX_BITRATE)
-		printk(KERN_WARNING
-		       "%s: BAR5 bitrate field is outside current V4L2 range [%u..%u]\n",
-		       dev->name, MZ0380_MIN_BITRATE, MZ0380_MAX_BITRATE);
+		pr_warn("%s: BAR5 bitrate field is outside current V4L2 range [%u..%u]\n",
+			dev->name, MZ0380_MIN_BITRATE, MZ0380_MAX_BITRATE);
 
 	return true;
 }
@@ -597,11 +592,10 @@ bool mz0380_sync_candidate_quality(struct mz0380_dev *dev,
 		return false;
 
 	dev->capture.quality = quality;
-	printk(KERN_INFO
-	       "%s: synced cached quality from candidate BAR5 field = %u (raw=%08x)%s%s\n",
-	       dev->name, quality, raw_word,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached quality from candidate BAR5 field = %u (raw=%08x)%s%s\n",
+		dev->name, quality, raw_word,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	return true;
 }
@@ -620,16 +614,14 @@ bool mz0380_sync_hw_quality(struct mz0380_dev *dev, const char *reason)
 		return false;
 
 	dev->capture.quality = quality;
-	printk(KERN_INFO
-	       "%s: synced cached quality from BAR5[0x%04x] = %u (raw=%08x)%s%s\n",
-	       dev->name, MZ0380_QUALITY_HW_REG, quality, raw_word,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached quality from BAR5[0x%04x] = %u (raw=%08x)%s%s\n",
+		dev->name, MZ0380_QUALITY_HW_REG, quality, raw_word,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	if (quality < MZ0380_MIN_QUALITY || quality > MZ0380_MAX_QUALITY)
-		printk(KERN_WARNING
-		       "%s: BAR5 quality field is outside current V4L2 range [%u..%u]\n",
-		       dev->name, MZ0380_MIN_QUALITY, MZ0380_MAX_QUALITY);
+		pr_warn("%s: BAR5 quality field is outside current V4L2 range [%u..%u]\n",
+			dev->name, MZ0380_MIN_QUALITY, MZ0380_MAX_QUALITY);
 
 	return true;
 }
@@ -649,11 +641,10 @@ bool mz0380_sync_candidate_gop(struct mz0380_dev *dev,
 		return false;
 
 	dev->capture.gop_size = gop;
-	printk(KERN_INFO
-	       "%s: synced cached GOP from candidate BAR5 field = %u (raw=%08x)%s%s\n",
-	       dev->name, gop, raw_word,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached GOP from candidate BAR5 field = %u (raw=%08x)%s%s\n",
+		dev->name, gop, raw_word,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	return true;
 }
@@ -669,20 +660,18 @@ bool mz0380_sync_candidate_b_frames(struct mz0380_dev *dev,
 		return false;
 
 	if (b_frames > MZ0380_MAX_B_FRAMES) {
-		printk(KERN_WARNING
-		       "%s: candidate B-frame field returned out-of-range value %u (raw=%08x)%s%s\n",
-		       dev->name, b_frames, raw_word,
-		       reason && *reason ? " during " : "",
-		       reason && *reason ? reason : "");
+		pr_warn("%s: candidate B-frame field returned out-of-range value %u (raw=%08x)%s%s\n",
+			dev->name, b_frames, raw_word,
+			reason && *reason ? " during " : "",
+			reason && *reason ? reason : "");
 		return false;
 	}
 
 	dev->capture.b_frames = b_frames;
-	printk(KERN_INFO
-	       "%s: synced cached B-frames from candidate BAR5 field = %u (raw=%08x)%s%s\n",
-	       dev->name, b_frames, raw_word,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached B-frames from candidate BAR5 field = %u (raw=%08x)%s%s\n",
+		dev->name, b_frames, raw_word,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	return true;
 }
@@ -698,20 +687,18 @@ bool mz0380_sync_hw_b_frames(struct mz0380_dev *dev,
 		return false;
 
 	if (b_frames > MZ0380_MAX_B_FRAMES) {
-		printk(KERN_WARNING
-		       "%s: BAR5 B-frame field returned out-of-range value %u (raw=%08x)%s%s\n",
-		       dev->name, b_frames, raw_word,
-		       reason && *reason ? " during " : "",
-		       reason && *reason ? reason : "");
+		pr_warn("%s: BAR5 B-frame field returned out-of-range value %u (raw=%08x)%s%s\n",
+			dev->name, b_frames, raw_word,
+			reason && *reason ? " during " : "",
+			reason && *reason ? reason : "");
 		return false;
 	}
 
 	dev->capture.b_frames = b_frames;
-	printk(KERN_INFO
-	       "%s: synced cached B-frames from BAR5[0x%04x] = %u (raw=%08x)%s%s\n",
-	       dev->name, MZ0380_B_FRAMES_HW_REG, b_frames, raw_word,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached B-frames from BAR5[0x%04x] = %u (raw=%08x)%s%s\n",
+		dev->name, MZ0380_B_FRAMES_HW_REG, b_frames, raw_word,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	return true;
 }
@@ -727,11 +714,10 @@ bool mz0380_sync_candidate_qp_step(struct mz0380_dev *dev,
 		return false;
 
 	dev->capture.qp_step = qp_step;
-	printk(KERN_INFO
-	       "%s: synced cached QP step from candidate BAR5 field = %u (raw=%08x)%s%s\n",
-	       dev->name, qp_step, raw_word,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached QP step from candidate BAR5 field = %u (raw=%08x)%s%s\n",
+		dev->name, qp_step, raw_word,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	return true;
 }
@@ -746,11 +732,10 @@ bool mz0380_sync_hw_qp_step(struct mz0380_dev *dev, const char *reason)
 		return false;
 
 	dev->capture.qp_step = qp_step;
-	printk(KERN_INFO
-	       "%s: synced cached QP step from BAR5[0x%04x] = %u (raw=%08x)%s%s\n",
-	       dev->name, MZ0380_QP_STEP_HW_REG, qp_step, raw_word,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached QP step from BAR5[0x%04x] = %u (raw=%08x)%s%s\n",
+		dev->name, MZ0380_QP_STEP_HW_REG, qp_step, raw_word,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	return true;
 }
@@ -769,11 +754,10 @@ bool mz0380_sync_hw_gop(struct mz0380_dev *dev, const char *reason)
 		return false;
 
 	dev->capture.gop_size = gop;
-	printk(KERN_INFO
-	       "%s: synced cached GOP from BAR5[0x%04x] = %u (raw=%08x)%s%s\n",
-	       dev->name, MZ0380_GOP_HW_REG, gop, raw_word,
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached GOP from BAR5[0x%04x] = %u (raw=%08x)%s%s\n",
+		dev->name, MZ0380_GOP_HW_REG, gop, raw_word,
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	return true;
 }
@@ -816,20 +800,18 @@ bool mz0380_sync_candidate_record_mode(struct mz0380_dev *dev,
 		return false;
 
 	if (mode >= MZ0380_RECORD_MODE_COUNT) {
-		printk(KERN_WARNING
-		       "%s: candidate record-mode field returned out-of-range value %u (raw=%08x)%s%s\n",
-		       dev->name, mode, raw_word,
-		       reason && *reason ? " during " : "",
-		       reason && *reason ? reason : "");
+		pr_warn("%s: candidate record-mode field returned out-of-range value %u (raw=%08x)%s%s\n",
+			dev->name, mode, raw_word,
+			reason && *reason ? " during " : "",
+			reason && *reason ? reason : "");
 		return false;
 	}
 
 	dev->capture.record_mode = mode;
-	printk(KERN_INFO
-	       "%s: synced cached record mode from candidate BAR5 field = %u (%s)%s%s\n",
-	       dev->name, mode, mz0380_record_mode_name(mode),
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached record mode from candidate BAR5 field = %u (%s)%s%s\n",
+		dev->name, mode, mz0380_record_mode_name(mode),
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	return true;
 }
@@ -845,21 +827,19 @@ bool mz0380_sync_hw_record_mode(struct mz0380_dev *dev,
 		return false;
 
 	if (mode >= MZ0380_RECORD_MODE_COUNT) {
-		printk(KERN_WARNING
-		       "%s: BAR5 record-mode field returned out-of-range value %u (raw=%08x)%s%s\n",
-		       dev->name, mode, raw_word,
-		       reason && *reason ? " during " : "",
-		       reason && *reason ? reason : "");
+		pr_warn("%s: BAR5 record-mode field returned out-of-range value %u (raw=%08x)%s%s\n",
+			dev->name, mode, raw_word,
+			reason && *reason ? " during " : "",
+			reason && *reason ? reason : "");
 		return false;
 	}
 
 	dev->capture.record_mode = mode;
-	printk(KERN_INFO
-	       "%s: synced cached record mode from BAR5[0x%04x] = %u (%s)%s%s\n",
-	       dev->name, MZ0380_RECORD_MODE_HW_REG, mode,
-	       mz0380_record_mode_name(mode),
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached record mode from BAR5[0x%04x] = %u (%s)%s%s\n",
+		dev->name, MZ0380_RECORD_MODE_HW_REG, mode,
+		mz0380_record_mode_name(mode),
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	return true;
 }
@@ -873,21 +853,19 @@ bool mz0380_sync_hw_input_select(struct mz0380_dev *dev, const char *reason)
 		return false;
 
 	if (input >= MZ0380_INPUT_COUNT) {
-		printk(KERN_WARNING
-		       "%s: BAR5[0x%04x][2:0] returned out-of-range input %u (raw=%08x)%s%s\n",
-		       dev->name, MZ0380_INPUT_SELECT_HW_REG, input, raw_word,
-		       reason && *reason ? " during " : "",
-		       reason && *reason ? reason : "");
+		pr_warn("%s: BAR5[0x%04x][2:0] returned out-of-range input %u (raw=%08x)%s%s\n",
+			dev->name, MZ0380_INPUT_SELECT_HW_REG, input, raw_word,
+			reason && *reason ? " during " : "",
+			reason && *reason ? reason : "");
 		return false;
 	}
 
 	dev->capture.input = input;
-	printk(KERN_INFO
-	       "%s: synced cached input from BAR5[0x%04x][2:0] = %u (%s)%s%s\n",
-	       dev->name, MZ0380_INPUT_SELECT_HW_REG, input,
-	       mz0380_input_name(input),
-	       reason && *reason ? " during " : "",
-	       reason && *reason ? reason : "");
+	pr_info("%s: synced cached input from BAR5[0x%04x][2:0] = %u (%s)%s%s\n",
+		dev->name, MZ0380_INPUT_SELECT_HW_REG, input,
+		mz0380_input_name(input),
+		reason && *reason ? " during " : "",
+		reason && *reason ? reason : "");
 
 	return true;
 }

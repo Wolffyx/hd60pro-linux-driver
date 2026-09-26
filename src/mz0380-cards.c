@@ -14,7 +14,7 @@
 
 #include "mz0380.h"
 
-struct mz0380_board mz0380_boards[] = {
+const struct mz0380_board mz0380_boards[] = {
 	[MZ0380_BOARD_UNKNOWN] = {
 		.name = "UNKNOWN/GENERIC",
 		.windows_driver = "unknown",
@@ -30,7 +30,7 @@ struct mz0380_board mz0380_boards[] = {
 };
 const unsigned int mz0380_bcount = ARRAY_SIZE(mz0380_boards);
 
-struct mz0380_subid mz0380_subids[] = {
+const struct mz0380_subid mz0380_subids[] = {
 	/* Rev. 1 (original) */
 	{ .subvendor = 0x1cfa, .subdevice = 0x0003,
 	  .card = MZ0380_BOARD_ELGATO_HD60_PRO },
@@ -55,24 +55,22 @@ void mz0380_card_list(struct mz0380_dev *dev)
 
 	if (dev->pci->subsystem_vendor == 0 &&
 	    dev->pci->subsystem_device == 0) {
-		printk(KERN_INFO
-		       "%s: Board has no valid PCIe subsystem ID.\n"
-		       "%s: Pass card=<n> as an insmod option to override autodetect.\n",
-		       dev->name, dev->name);
+		pr_info("%s: Board has no valid PCIe subsystem ID.\n"
+			"%s: Pass card=<n> as an insmod option to override autodetect.\n",
+			dev->name, dev->name);
 	} else {
-		printk(KERN_INFO
-		       "%s: Board %04x:%04x is not known to the driver.\n"
-		       "%s: Pass card=<n> as an insmod option to override autodetect.\n",
-		       dev->name,
-		       dev->pci->subsystem_vendor,
-		       dev->pci->subsystem_device,
-		       dev->name);
+		pr_info("%s: Board %04x:%04x is not known to the driver.\n"
+			"%s: Pass card=<n> as an insmod option to override autodetect.\n",
+			dev->name,
+			dev->pci->subsystem_vendor,
+			dev->pci->subsystem_device,
+			dev->name);
 	}
 
-	printk(KERN_INFO "%s: Valid card=<n> values are:\n", dev->name);
+	pr_info("%s: Valid card=<n> values are:\n", dev->name);
 	for (i = 0; i < mz0380_bcount; i++)
-		printk(KERN_INFO "%s:    card=%d -> %s\n",
-		       dev->name, i, mz0380_boards[i].name);
+		pr_info("%s:    card=%d -> %s\n",
+			dev->name, i, mz0380_boards[i].name);
 }
 
 int mz0380_card_setup(struct mz0380_dev *dev)
@@ -116,9 +114,8 @@ int mz0380_card_setup(struct mz0380_dev *dev)
 	mz0380_mst3367_bringup(dev);
 
 	if (!mz0380_enable_video) {
-		printk(KERN_INFO
-		       "%s: probe-safe V4L2 node disabled; load with enable_video=1 when you want /dev/video*\n",
-		       dev->name);
+		pr_info("%s: probe-safe V4L2 node disabled; load with enable_video=1 when you want /dev/video*\n",
+			dev->name);
 		return 0;
 	}
 

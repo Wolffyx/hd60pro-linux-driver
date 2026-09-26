@@ -6,7 +6,7 @@
 #include "mz0380-internal.h"
 
 bool mz0380_probe_windows;
-module_param_named(probe_windows, mz0380_probe_windows, bool, 0644);
+module_param_named(probe_windows, mz0380_probe_windows, bool, 0444);
 MODULE_PARM_DESC(probe_windows,
 		 "M32 probe: also program outbound windows 1-3 (op 0x04/0x05/0x03) pointing at stream bufs 1/2/3, to find where the encoder writes its bitstream (def:0)");
 
@@ -66,7 +66,7 @@ MODULE_PARM_DESC(raw_deliver,
 		 "M217/M218/M240: make I420 raw the STARTUP delivery format and the first ENUM_FMT entry (def:1 since M240 - most camera applications take the first format or cannot use H.264 at all). 0 restores H.264 first. Either way both formats are enumerated and an application can pick with S_FMT. post_mask bit 0 is forced on whenever raw is live, so no other parameter is needed");
 
 bool mz0380_h264_probe = true;	/* M216: this is the capture path */
-module_param_named(h264_probe, mz0380_h264_probe, bool, 0644);
+module_param_named(h264_probe, mz0380_h264_probe, bool, 0444);
 MODULE_PARM_DESC(h264_probe,
 		 "allocate/register a dedicated Windows-style H.264 window-1 ring and deliver from its completion events. DEFAULT 1 since M216 - this stopped being a diagnostic at M177 and is now the working capture path");
 
@@ -654,7 +654,7 @@ MODULE_PARM_DESC(mst_b0_late,
  * scan reports (0/1024 pages) while the receiver holds a clean lock.
  */
 unsigned int mz0380_set_buf_opcode = 0x02;
-module_param_named(set_buf_opcode, mz0380_set_buf_opcode, uint, 0644);
+module_param_named(set_buf_opcode, mz0380_set_buf_opcode, uint, 0444);
 MODULE_PARM_DESC(set_buf_opcode,
 		 "M75: opcode that programs encoder DMA buffers - 2 (def), or 4/5/8 as the Windows driver uses");
 

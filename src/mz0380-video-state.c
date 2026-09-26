@@ -5,45 +5,6 @@
 
 #include "mz0380-internal.h"
 
-static const char *mz0380_h264_profile_name(u32 profile)
-{
-	switch (profile) {
-	case V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE:
-		return "baseline";
-	case V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE:
-		return "constrained-baseline";
-	case V4L2_MPEG_VIDEO_H264_PROFILE_MAIN:
-		return "main";
-	case V4L2_MPEG_VIDEO_H264_PROFILE_HIGH:
-		return "high";
-	default:
-		return "other";
-	}
-}
-
-static const char *mz0380_h264_level_name(u32 level)
-{
-	switch (level) {
-	case V4L2_MPEG_VIDEO_H264_LEVEL_3_0:
-		return "3.0";
-	case V4L2_MPEG_VIDEO_H264_LEVEL_3_1:
-		return "3.1";
-	case V4L2_MPEG_VIDEO_H264_LEVEL_3_2:
-		return "3.2";
-	case V4L2_MPEG_VIDEO_H264_LEVEL_4_0:
-		return "4.0";
-	case V4L2_MPEG_VIDEO_H264_LEVEL_4_1:
-		return "4.1";
-	case V4L2_MPEG_VIDEO_H264_LEVEL_4_2:
-		return "4.2";
-	case V4L2_MPEG_VIDEO_H264_LEVEL_5_0:
-		return "5.0";
-	default:
-		return "other";
-	}
-}
-
-
 void mz0380_video_state_dump(struct seq_file *m, struct mz0380_dev *dev)
 {
 	unsigned int fps_milli;
@@ -281,8 +242,14 @@ void mz0380_video_state_dump(struct seq_file *m, struct mz0380_dev *dev)
 			   hw_quality_reg, hw_quality_mask,
 			   hw_quality_shift);
 	}
-	seq_printf(m, "  bitrate    : %u peak=%u\n",
-		   dev->capture.bitrate, dev->capture.bitrate_peak);
+	/*
+	 * M245: the encoder's own numbers, from the V4L2 controls, as sent in
+	 * SET_ENC_PARAMS. The "bitrate"/"gop" lines below them are the BAR5
+	 * property experiment, which the encoder has never read.
+	 */
+	seq_printf(m, "  encoder    : bitrate=%u gop=%u (V4L2 controls, sent in SET_ENC_PARAMS)\n",
+		   dev->capture.enc_bitrate, dev->capture.enc_gop);
+	seq_printf(m, "  bitrate    : %u\n", dev->capture.bitrate);
 	if (mz0380_read_hw_bitrate(dev, &hw_bitrate, &hw_bitrate_word,
 				   &hw_bitrate_reg, &hw_bitrate_mask,
 				   &hw_bitrate_shift)) {
@@ -344,12 +311,4 @@ void mz0380_video_state_dump(struct seq_file *m, struct mz0380_dev *dev)
 			   candidate_b_frames_reg, candidate_b_frames_mask,
 			   candidate_b_frames_shift);
 	}
-	seq_printf(m, "  h264       : profile=%s level=%s\n",
-		   mz0380_h264_profile_name(dev->capture.h264_profile),
-		   mz0380_h264_level_name(dev->capture.h264_level));
-	seq_printf(m, "  image ctrl : bright=%u contrast=%u hue=%u sat=%u sharp=%u\n",
-		   dev->capture.brightness, dev->capture.contrast,
-		   dev->capture.hue, dev->capture.saturation,
-		   dev->capture.sharpness);
-	seq_puts(m, "  stream     : disabled until control path and DMA are understood\n");
 }

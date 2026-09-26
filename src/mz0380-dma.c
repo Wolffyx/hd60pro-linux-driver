@@ -43,7 +43,6 @@ int mz0380_dma_ring_alloc(struct mz0380_dev *dev, struct mz0380_ring *r,
 	r->tail_seen = 0;
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_dma_ring_alloc);
 
 void mz0380_dma_ring_free(struct mz0380_dev *dev, struct mz0380_ring *r)
 {
@@ -55,7 +54,6 @@ void mz0380_dma_ring_free(struct mz0380_dev *dev, struct mz0380_ring *r)
 	r->total_size = 0;
 	r->nr_entries = 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_dma_ring_free);
 
 /* --- streaming buffer set (video channel 0) ------------------------------ */
 
@@ -300,8 +298,18 @@ static int mz0380_stream_bufs_alloc_iova(struct mz0380_dev *dev)
 		return -EINVAL;
 	}
 
+	/*
+	 * M245: and above the first 4 GiB, which is where the DMA-API allocator
+	 * is confined to (see the mask in mz0380_irq_request()).
+	 */
+	if (!upper_32_bits(mz0380_dma_iova_base)) {
+		pr_err("%s: dma_iova_base 0x%llx is below 4GiB - that range belongs to the kernel's DMA allocator for this device\n",
+		       dev->name, mz0380_dma_iova_base);
+		return -EINVAL;
+	}
+
 	if (!domain) {
-		pr_err("%s: no IOMMU domain for the device - cannot place buffers at a 4GiB-aligned IOVA\n",
+		pr_err("%s: no IOMMU domain for the device - cannot place buffers at a 4GiB-aligned IOVA. This card only latches the high 32 bits of a DMA target, so it needs IOMMU translation: boot without iommu=off/iommu=pt\n",
 		       dev->name);
 		return -ENODEV;
 	}
@@ -458,7 +466,7 @@ static int mz0380_raw_probe_program_bufs(struct mz0380_dev *dev)
 				pr_err("%s: raw bank%u buf[%u] is not allocated - raw_bank_%s is a LOAD-TIME parameter (the banks come from mz0380_dma_setup at probe). Reload with RAWOBS=1 (or RAWPROBE=1) instead of setting it through sysfs\n",
 				       dev->name, bank, i,
 				       mz0380_raw_bank_observe ? "observe" :
-							         "probe");
+								 "probe");
 				return -ENODEV;
 			}
 			memset(b->va, poison, MZ0380_RAW_PROBE_BUF_SIZE);
@@ -712,14 +720,32 @@ int mz0380_irq_request(struct mz0380_dev *dev)
 	if (dev->irq_requested)
 		return 0;
 
-	ret = dma_set_mask_and_coherent(&dev->pci->dev, DMA_BIT_MASK(64));
-	if (ret) {
+	/*
+	 * M245: keep the kernel's own DMA mappings below 4 GiB.
+	 *
+	 * The M26 buffers are placed with iommu_map() straight into the
+	 * device's DMA-API domain, at dma_iova_base + (i << 32) - IOVAs the
+	 * domain's allocator does not know are taken, so a later DMA-API
+	 * mapping for this device could be handed the same address. A 32-bit
+	 * mask confines every allocator-chosen IOVA for this device to the low
+	 * 4 GiB, and mz0380_stream_bufs_alloc_iova() refuses a base below
+	 * 4 GiB, so the two ranges cannot meet. The mask only steers the
+	 * allocator: the card still reaches the high windows, because the
+	 * IOMMU translates whatever is mapped.
+	 *
+	 * The full fix is a private IOMMU domain owned by this driver, which
+	 * needs the card alone in its IOMMU group - not true on every board -
+	 * so it stays a follow-up.
+	 */
+	ret = dma_set_mask_and_coherent(&dev->pci->dev,
+					mz0380_dma_iova_remap ?
+					DMA_BIT_MASK(32) : DMA_BIT_MASK(64));
+	if (ret)
 		ret = dma_set_mask_and_coherent(&dev->pci->dev,
 						DMA_BIT_MASK(32));
-		if (ret) {
-			pr_err("%s: no usable DMA mask\n", dev->name);
-			return ret;
-		}
+	if (ret) {
+		dev_err(&dev->pci->dev, "no usable DMA mask\n");
+		return ret;
 	}
 
 	/*
@@ -770,6 +796,19 @@ int mz0380_irq_request(struct mz0380_dev *dev)
 		dev->video_sequence = 0;
 	dev->frame_poison_active = false;
 	INIT_WORK(&dev->drain_work, mz0380_drain_work_fn);
+	/*
+	 * M245: the drain copies up to 3 MB per frame. On the shared system
+	 * workqueue that competes with - and delays - unrelated work, and
+	 * inherits its latency. A dedicated high-priority queue gives the frame
+	 * copy its own worker; max_active 1 keeps drains strictly serial, which
+	 * the single-work-item design already assumed.
+	 */
+	dev->drain_wq = alloc_workqueue("mz0380-drain/%u",
+					WQ_HIGHPRI | WQ_UNBOUND, 1, dev->nr);
+	if (!dev->drain_wq) {
+		pci_free_irq_vectors(dev->pci);
+		return -ENOMEM;
+	}
 
 	ret = request_irq(dev->irq, mz0380_isr,
 			  dev->msi_enabled ? 0 : IRQF_SHARED,
@@ -777,6 +816,8 @@ int mz0380_irq_request(struct mz0380_dev *dev)
 	if (ret) {
 		pr_err("%s: request_irq(%d) failed (%d)\n",
 		       dev->name, dev->irq, ret);
+		destroy_workqueue(dev->drain_wq);
+		dev->drain_wq = NULL;
 		pci_free_irq_vectors(dev->pci);
 		return ret;
 	}
@@ -787,7 +828,6 @@ int mz0380_irq_request(struct mz0380_dev *dev)
 		dev->msi_enabled ? "MSI" : "INTx");
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_irq_request);
 
 void mz0380_irq_release(struct mz0380_dev *dev)
 {
@@ -799,8 +839,12 @@ void mz0380_irq_release(struct mz0380_dev *dev)
 	pci_free_irq_vectors(dev->pci);
 	dev->irq_requested = false;
 	dev->msi_enabled = false;
+	if (dev->drain_wq) {
+		/* flush_events cancelled the work; nothing can requeue it now. */
+		destroy_workqueue(dev->drain_wq);
+		dev->drain_wq = NULL;
+	}
 }
-EXPORT_SYMBOL_GPL(mz0380_irq_release);
 
 int mz0380_dma_setup(struct mz0380_dev *dev)
 {
@@ -913,7 +957,6 @@ int mz0380_dma_setup(struct mz0380_dev *dev)
 	dev->dma_armed = true;
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_dma_setup);
 
 /*
  * M30. With zero IOMMU faults we can no longer see the card's writes: an IOMMU
@@ -999,7 +1042,7 @@ void mz0380_handle_event_snapshot(struct mz0380_dev *dev, u32 event)
 				 * Publish and queue atomically with respect to streamoff:
 				 * cancel_work_sync() must not miss a not-yet-queued kick.
 				 */
-				schedule_work(&dev->drain_work);
+				queue_work(dev->drain_wq, &dev->drain_work);
 			}
 		}
 	}
@@ -1035,7 +1078,6 @@ void mz0380_handle_event_snapshot(struct mz0380_dev *dev, u32 event)
 	}
 
 }
-EXPORT_SYMBOL_GPL(mz0380_handle_event_snapshot);
 
 void mz0380_frame_events_start(struct mz0380_dev *dev)
 {
@@ -1130,4 +1172,3 @@ void mz0380_dma_flush_events(struct mz0380_dev *dev)
 	if (pending || ack_deferred || drop_tokens)
 		mz0380_enc_stat_ack(dev);
 }
-EXPORT_SYMBOL_GPL(mz0380_dma_flush_events);

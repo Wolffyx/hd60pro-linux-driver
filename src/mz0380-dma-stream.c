@@ -9,8 +9,17 @@ static int mz0380_stream_configure_encoder(struct mz0380_dev *dev, u32 fps,
 					   u32 main_or_sub)
 {
 	u32 enc[10] = { 0 };
-	u32 gop = dev->capture.gop_size;
-	u32 bitrate = dev->capture.bitrate;
+	/*
+	 * M245: the main stream's GOP and bitrate come from the V4L2 controls,
+	 * whose defaults are the Windows main-stream values - so an application
+	 * that never sets them sends exactly what it always did. On the
+	 * tinyvenc7 path the sub stream keeps Windows' own numbers (nothing
+	 * reads it back); the legacy path mirrors main into sub as before.
+	 */
+	bool windows_sub = main_or_sub &&
+			   (mz0380_h264_probe || mz0380_raw_probe_enc_tail);
+	u32 gop = windows_sub ? 30 : dev->capture.enc_gop;
+	u32 bitrate = windows_sub ? 4000000 : dev->capture.enc_bitrate;
 	u32 quality = 0, frame_skip = 0, frame_avg = 0;
 	u32 frame_divisor = 0;
 	bool fallback = false;
@@ -40,10 +49,13 @@ static int mz0380_stream_configure_encoder(struct mz0380_dev *dev, u32 fps,
 	 * just mirrors the main configuration here.
 	 */
 	if (mz0380_h264_probe || mz0380_raw_probe_enc_tail) {
-		/* Exact values logged by the Windows 1.1.195.0 capture driver. */
+		/*
+		 * Mask and quality are the exact values logged by the Windows
+		 * 1.1.195.0 capture driver. GOP and bitrate were too (32 and
+		 * 4194304 for main, 30 and 4000000 for sub) and still are by
+		 * default - see the top of this function.
+		 */
 		enc[0] = 0x3fff;
-		gop = main_or_sub ? 30 : 32;
-		bitrate = main_or_sub ? 4000000 : 4194304;
 		quality = 24;
 		/*
 		 * M204 corrects the old QP interpretation: tinyvenc7's own
@@ -779,7 +791,6 @@ err_events:
 	}
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_dma_start);
 
 void __mz0380_dma_stop(struct mz0380_dev *dev, bool verbose)
 {
@@ -853,13 +864,36 @@ void __mz0380_dma_stop(struct mz0380_dev *dev, bool verbose)
 	}
 }
 
+/*
+ * M245: leave the card idle for a reboot, kexec or suspend.
+ *
+ * With stop_on_streamoff=0 a persistent pipeline deliberately outlives every
+ * STREAMOFF (M156) and is only stopped at unload. Nothing stopped it at
+ * shutdown, so a warm reboot handed the next boot a card still DMAing into
+ * IOVAs nothing had mapped yet. This is the unload path's STOP without its
+ * diagnostics dump, and it is safe to call on a card that is not streaming.
+ */
+void mz0380_dma_quiesce(struct mz0380_dev *dev)
+{
+	WRITE_ONCE(dev->streaming, false);
+	mz0380_signal_recovery_stop(dev);
+	mz0380_poll_drain_stop(dev);
+	if (dev->dma_armed && READ_ONCE(dev->pipeline_running)) {
+		int ret = mz0380_stream_stop_all(dev, 2000);
+
+		dev_info(&dev->pci->dev,
+			 "quiesce: STOP_STREAMING(all channels) ret=%d\n", ret);
+		WRITE_ONCE(dev->pipeline_running, false);
+	}
+	mz0380_dma_flush_events(dev);
+}
+
 void mz0380_dma_stop(struct mz0380_dev *dev)
 {
 	WRITE_ONCE(dev->streaming, false);
 	mz0380_signal_recovery_stop(dev);
 	__mz0380_dma_stop(dev, true);
 }
-EXPORT_SYMBOL_GPL(mz0380_dma_stop);
 
 /*
  * The true encoded-byte count exists in a card-side enc_stat structure, but

@@ -654,7 +654,6 @@ int mz0380_mst3367_read_lock(struct mz0380_dev *dev, bool *locked,
 	mutex_unlock(&mst3367_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_read_lock);
 
 /*
  * Read the MST3367 mode-detect block and fill *out. Returns 0 with a valid
@@ -800,4 +799,3 @@ out_unlock:
 	mutex_unlock(&mst3367_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_mst3367_read_signal);

@@ -92,6 +92,15 @@
 #define MZ0380_MIN_GOP                  1
 #define MZ0380_DEFAULT_GOP              30
 #define MZ0380_MAX_GOP                  300
+/*
+ * M245: the V4L2 encoder controls. Defaults are the main-stream values the
+ * Windows 1.1.195.0 driver sends and the H.264 path was validated with, so an
+ * application that never touches the controls gets exactly what it got before.
+ * SET_ENC_PARAMS carries the GOP in one byte.
+ */
+#define MZ0380_ENC_DEFAULT_BITRATE      4194304
+#define MZ0380_ENC_DEFAULT_GOP          32
+#define MZ0380_ENC_MAX_GOP              255
 #define MZ0380_MIN_QUALITY              0
 #define MZ0380_DEFAULT_QUALITY          80
 #define MZ0380_MAX_QUALITY              100
@@ -211,19 +220,23 @@ struct mz0380_capture_state {
 	bool source_interlaced;
 	u32 input;
 	u32 record_mode;
+	/*
+	 * BAR5 property-experiment mirrors (RE instruments driven from
+	 * /proc/mz0380-control). The encoder never reads these.
+	 */
 	u32 bitrate;
 	u32 quality;
-	u32 bitrate_peak;
 	u32 gop_size;
 	u32 qp_step;
 	u32 b_frames;
-	u32 h264_profile;
-	u32 h264_level;
-	u32 brightness;
-	u32 contrast;
-	u32 hue;
-	u32 saturation;
-	u32 sharpness;
+	/*
+	 * M245: what SET_ENC_PARAMS actually sends for the main stream, set by
+	 * the V4L2 bitrate/GOP controls. Kept apart from the BAR5 mirrors above
+	 * so a probe-time readback of an unverified register cannot reach the
+	 * encoder.
+	 */
+	u32 enc_bitrate;
+	u32 enc_gop;
 };
 
 struct mz0380_mode {
@@ -316,14 +329,13 @@ struct mz0380_dev {
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct video_device vdev;
 	struct v4l2_ctrl *bitrate_ctrl;
-	struct v4l2_ctrl *quality_ctrl;
 	struct v4l2_ctrl *gop_ctrl;
-	struct v4l2_ctrl *b_frames_ctrl;
-	struct v4l2_ctrl *record_mode_ctrl;
 	struct mz0380_capture_state capture;
 
 	/* Firmware */
 	enum mz0380_fw_state fw_state;
+	/* M245: post-resume handshake, run off the resume path. */
+	struct work_struct resume_work;
 	struct mutex fw_lock;
 	u16 fw_version_major;
 	u16 fw_version_minor;
@@ -498,10 +510,10 @@ struct mz0380_dev {
 
 	/* vb2 video streaming */
 	struct vb2_queue vb_queue;
-	struct mutex queue_lock;
 	struct list_head buf_list;
 	spinlock_t buf_lock;
 	struct work_struct drain_work;
+	struct workqueue_struct *drain_wq;	/* M245 */
 	spinlock_t frame_event_lock;
 	struct mz0380_frame_event
 		frame_events[MZ0380_FRAME_EVENT_FIFO_SIZE];
@@ -566,6 +578,8 @@ struct mz0380_dev {
 	 * G to return it, and G was answering with the live detection instead.
 	 */
 	struct v4l2_dv_timings set_timings;
+	/* M245: an application called S_DV_TIMINGS; detection must not clobber it. */
+	bool timings_set_by_user;
 	/*
 	 * M65: the last detection that actually succeeded, kept across later
 	 * failures. A source that transmits in short bursts cannot be locked
@@ -611,9 +625,9 @@ struct mz0380_dev {
 	bool event_watching;
 };
 
-extern struct mz0380_board mz0380_boards[];
+extern const struct mz0380_board mz0380_boards[];
 extern const unsigned int mz0380_bcount;
-extern struct mz0380_subid mz0380_subids[];
+extern const struct mz0380_subid mz0380_subids[];
 extern const unsigned int mz0380_idcount;
 extern bool mz0380_enable_video;
 
@@ -623,6 +637,10 @@ void mz0380_card_cleanup(struct mz0380_dev *dev);
 
 int mz0380_video_register(struct mz0380_dev *dev);
 void mz0380_video_unregister(struct mz0380_dev *dev);
+void mz0380_dev_put(struct mz0380_dev *dev);
+void mz0380_encoder_ctrls_grab(struct mz0380_dev *dev, bool grabbed);
+u32 mz0380_sizeimage_for(struct mz0380_dev *dev, bool raw, u32 width,
+			 u32 height);
 void mz0380_video_state_dump(struct seq_file *m, struct mz0380_dev *dev);
 void mz0380_capture_state_init(struct mz0380_dev *dev);
 const char *mz0380_input_name(u32 input);
@@ -772,6 +790,7 @@ int mz0380_dma_setup(struct mz0380_dev *dev);
 void mz0380_dma_teardown(struct mz0380_dev *dev);
 int mz0380_dma_start(struct mz0380_dev *dev);
 void mz0380_dma_stop(struct mz0380_dev *dev);
+void mz0380_dma_quiesce(struct mz0380_dev *dev);
 /*
  * Non-sleeping pre-ACK hook.  mz0380_mb_ack_event() must call this with the
  * live EVENT value before clearing EVENT, so TOKEN/PAYLOAD cannot be lost when
@@ -786,7 +805,6 @@ int mz0380_dma_ring_alloc(struct mz0380_dev *dev, struct mz0380_ring *r,
 			  u32 nr_entries, u32 entry_size);
 void mz0380_dma_ring_free(struct mz0380_dev *dev, struct mz0380_ring *r);
 void mz0380_dma_drain_video(struct mz0380_dev *dev);
-void mz0380_dma_drain_audio(struct mz0380_dev *dev);
 
 /* HDMI signal detect and DV timings (mz0380-signal.c) */
 extern const struct v4l2_dv_timings mz0380_no_signal;
@@ -835,17 +853,14 @@ void mz0380_no_signal_stop(struct mz0380_dev *dev);
 int mz0380_gpio_dump(struct mz0380_dev *dev);			/* M51b */
 int mz0380_mst3367_edidhunt(struct mz0380_dev *dev);		/* M53  */
 int mz0380_i2cbb_scan(struct mz0380_dev *dev, u8 sda, u8 scl);	/* M51 */
-int mz0380_i2cbb_edid_burn(struct mz0380_dev *dev, u8 sda, u8 scl, u8 addr7);
 
 /* ALSA audio (mz0380-audio.c) */
 #if IS_ENABLED(CONFIG_SND)
 int mz0380_audio_register(struct mz0380_dev *dev);
 void mz0380_audio_unregister(struct mz0380_dev *dev);
-void mz0380_audio_period_elapsed(struct mz0380_dev *dev);
 #else
 static inline int mz0380_audio_register(struct mz0380_dev *dev) { return 0; }
 static inline void mz0380_audio_unregister(struct mz0380_dev *dev) {}
-static inline void mz0380_audio_period_elapsed(struct mz0380_dev *dev) {}
 #endif
 
 /*
@@ -970,6 +985,7 @@ extern unsigned int mz0380_post_di;
  * the other, twice.
  */
 size_t mz0380_raw_frame_bytes(struct mz0380_dev *dev);
+size_t mz0380_raw_frame_bytes_for(u32 width, u32 height);
 
 extern bool mz0380_raw_deliver;
 extern bool mz0380_raw_capable;

@@ -16,7 +16,7 @@
 # Decision table:
 #   - two or more pins read HIGH, and a scan on some pair reports
 #     "ACK at 0x50" -> the DDC EEPROM is found; burn with
-#       echo "edidburn <sda> <scl> 50" | sudo tee /proc/mz0380-hdmi
+#       (edidburn was removed in M245 - it wrote the card's EEPROM)
 #   - HIGH pins exist but every pair scans with 0 ACKs -> those pins are
 #     not the DDC pair (they may be status inputs); the EEPROM is likely
 #     only reachable from the card's own /dev/i2c-1, which the mailbox

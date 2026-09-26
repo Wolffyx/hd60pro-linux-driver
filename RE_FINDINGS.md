@@ -15172,3 +15172,112 @@ against the scene that produced it, and every long run so far contained some
 colourless stretch. `scripts/mz0380-m243-brightness-ab.sh` in `pcie` mode now
 runs the counter watch alongside the capture and prints the seconds at which
 `rawnochroma` moved, which reads directly against the scan's per-window luma.
+
+## M245 (2026-09-26): a whole-driver review, and the fixes it produced
+
+A read of the full lifecycle - probe/remove, V4L2/vb2, IRQ/mailbox, DMA and
+IOMMU, delivery, signal recovery, procfs, controls, ALSA. clang W=1 with
+`-Wextra` was already clean and checkpatch found only style, so everything
+below came from reading the code. Built clean after the changes; **none of it
+is hardware-verified yet** - `scripts/mz0380-m245-verify.sh` is the test.
+
+### Defects fixed
+
+1. **TRY_FMT wrote into the live device.** It set `deliver_raw`, `raw_fourcc`
+   and `capture` to the request, called the helpers, and restored them. The
+   drain reads those fields unlocked while it copies, so a TRY_FMT from any
+   process during a capture could copy one frame in the wrong chroma layout -
+   correct luma, green/magenta cast - or send it down the H.264 branch. That is
+   the M238 symptom class. The window is microseconds, so it is a candidate,
+   not a demonstrated cause. The format helpers are now pure functions of their
+   arguments (`mz0380_sizeimage_for`, `mz0380_fill_pix_format_for`).
+2. **S_FMT was only busy-checked for the raw/H.264 switch.** A second process
+   could change the raw layout (deliberately allowed mid-stream by M241) or
+   the geometry under another application's buffers. Now any change returns
+   `-EBUSY` while buffers exist, which is what V4L2 specifies.
+3. **Use-after-free on unbind with a handle open.** `vdev.release` was
+   `video_device_release_empty` and remove did `kfree(dev)`. The struct is now
+   freed from the `v4l2_device` release callback; remove unregisters the node
+   first with `vb2_video_unregister_device()`, which stops a stream while the
+   hardware is still mapped.
+4. **`card[]` read out of bounds** after 8 unbind/bind cycles: the card counter
+   was never decremented. Now an IDA.
+5. **Unprivileged hardware access through /proc.** `mz0380-periph-scan` (up to
+   256 mailbox I2C commands per read), `mz0380-scan` (raw BAR reads) and
+   `mz0380-hdmi` (receiver diag) were world-readable. Now root-only;
+   `mz0380-state` stays 0444 for the watch script, with its one mailbox read
+   (verbosity 3) gated on `CAP_SYS_ADMIN`.
+6. **Controls that lied.** Bitrate/quality/GOP/B-frames/record-mode wrote
+   unverified BAR5 registers and SET_ENC_PARAMS then ignored them; brightness,
+   contrast, hue, saturation, sharpness, profile, level and peak bitrate were
+   never read. Now: bitrate and GOP only, sent in SET_ENC_PARAMS for the main
+   stream, defaults = the Windows values (4194304 / 32) so default behaviour is
+   byte-identical. Grabbed while streaming; a change between sessions schedules
+   the persistent pipeline's replacement at the next attachment (one spawn).
+   Plus `V4L2_CID_DV_RX_POWER_PRESENT`, read-only, reporting receiver LOCK -
+   no +5V/cable bit is known on the MST3367, so a powered but unlocked source
+   reads 0.
+7. **Five inputs** on a one-connector card. Now HDMI only.
+8. **No `.shutdown`.** A persistent pipeline (stop_on_streamoff=0) survived
+   into a warm reboot or kexec. `mz0380_dma_quiesce()` sends STOP and bus
+   mastering is cleared. Suspend does the same after failing the vb2 queue;
+   resume redoes the handshake off the resume path (`resume_work`) and the
+   receiver comes back lazily. **Suspend/resume is untested.**
+9. **18 module parameters** that decide allocation, DMA addresses, pipeline
+   lifetime or the advertised format were 0644. Now 0444.
+10. **IOMMU:** buffers are `iommu_map`ped into the DMA-API domain behind its
+    allocator. Mitigated, not redesigned: with `dma_iova_remap` the DMA mask is
+    32-bit, so the allocator stays below 4 GiB, and a `dma_iova_base` below
+    4 GiB is refused. The full fix - a driver-owned domain - needs the card
+    alone in its IOMMU group, which is board-dependent.
+11. **EDID burn removed** - it wrote card EEPROM by bit-bang from a /proc write,
+    the same risk class as the deleted firmware upload.
+12. QUERY_DV_TIMINGS now returns `-ENOLINK` for no signal and `-ENOLCK` for
+    unstable (it returned `-ENOLCK` for both); a detection no longer overwrites
+    timings an application set with S_DV_TIMINGS; SD modes report BT.601.
+
+### Cleanup
+
+One mutex for vb2 and the other ioctls; drain on its own `WQ_HIGHPRI`
+workqueue instead of `system_wq`; 45 internal `EXPORT_SYMBOL_GPL`s removed;
+`printk(KERN_*)` -> `pr_*`; the per-command and per-frame info lines that no
+script parses moved to dynamic debug; notify pointer uses `pci_bus_address()`
+and says why the handshake fails if BAR0 is above 4 GiB; dead pre-4.0 procfs
+branch removed; `MODULE_AUTHOR` corrected; board tables `const`.
+
+### Deliberately not done
+
+- **HDMI audio.** The card's PCM transport is not reverse engineered. The ALSA
+  stub used to accept an open and never deliver a period, hanging clients; it
+  now refuses the open with a message.
+- **Operating without an IOMMU.** Not a software gap: the card latches only the
+  high 32 bits of a DMA target, so buffers must sit at 4 GiB-aligned bus
+  addresses, which needs translation. The error now says so.
+- **debugfs migration** of the /proc files - every hardware script and the
+  unprivileged watcher use the /proc paths, and debugfs is root-only.
+- **Condensing the M-number comments** - they are the index into this file.
+
+### M245 hardware results (2026-09-26)
+
+- **v4l2-compliance: 48 tests, 48 succeeded, 0 failed, 0 warnings.** The drop
+  from 148 is the input list: compliance repeats about 25 tests for every input
+  the node lists, and going from 5 inputs to 1 removes 4 x 25 = 100. The five
+  POWER_PRESENT warnings are gone.
+- **Unbind with a handle open: PASS.** The node disappears while the handle
+  stays open, closing it afterwards reports no fault, and rebind comes back as
+  `mz0380[0]` - the IDA reused the number. No KASAN on this kernel, so this
+  shows the old crash path is not taken, not that no stale access remains.
+- **Controls: PASS.** GOP 1..255 default 32, bitrate 262144..12582912 default
+  4194304, power_present read-only, nothing else; one input.
+- **Capture with a second process: PASS.** S_FMT(NV12) from another process
+  during a YU12 capture was refused as busy; 400 TRY_FMTs (NV12 and H264) left
+  the owner's format at YU12; 180 whole frames, no partial fills, no sentinel
+  poison. One spawn.
+- **Defect in the M245 change itself:** power_present read 0 with a locked
+  source. It reported the cached `signal_locked`, which nothing had refreshed
+  since the rebind. It now reads R55 live when no stream or pipeline is
+  running, and `m245-verify.sh ctrls` checks it against ENUM_INPUT's status.
+  **Re-run on a fresh load: power_present = 0x00000001 with the source
+  locked, agreeing with the input status. PASS.** Spawn tally 2.
+
+Still untested: suspend/resume and `.shutdown`.

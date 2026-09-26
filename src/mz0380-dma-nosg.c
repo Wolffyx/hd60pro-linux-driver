@@ -160,7 +160,6 @@ int mz0380_nosg_capture_start(struct mz0380_dev *dev)
 		MZ0380_NOSG_NV12_HEIGHT);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_nosg_capture_start);
 
 void mz0380_nosg_capture_stop(struct mz0380_dev *dev)
 {
@@ -187,4 +186,3 @@ void mz0380_nosg_capture_stop(struct mz0380_dev *dev)
 	pr_info("%s: nosg polling capture stopped after %u frames, %u encoder spawns\n",
 		dev->name, dev->nosg_sequence, dev->nosg_spawns);
 }
-EXPORT_SYMBOL_GPL(mz0380_nosg_capture_stop);

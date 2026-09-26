@@ -30,39 +30,23 @@ struct mz0380_pcm {
 	unsigned int hw_ptr_bytes;
 };
 
-#define MZ0380_AUDIO_RATE_MIN  32000
-#define MZ0380_AUDIO_RATE_MAX  48000
-#define MZ0380_AUDIO_CHANNELS  2
-
-static const struct snd_pcm_hardware mz0380_pcm_hw = {
-	.info             = SNDRV_PCM_INFO_INTERLEAVED |
-			    SNDRV_PCM_INFO_BLOCK_TRANSFER |
-			    SNDRV_PCM_INFO_MMAP |
-			    SNDRV_PCM_INFO_MMAP_VALID,
-	.formats          = SNDRV_PCM_FMTBIT_S16_LE,
-	.rates            = SNDRV_PCM_RATE_32000 |
-			    SNDRV_PCM_RATE_44100 |
-			    SNDRV_PCM_RATE_48000,
-	.rate_min         = MZ0380_AUDIO_RATE_MIN,
-	.rate_max         = MZ0380_AUDIO_RATE_MAX,
-	.channels_min     = MZ0380_AUDIO_CHANNELS,
-	.channels_max     = MZ0380_AUDIO_CHANNELS,
-	.buffer_bytes_max = 256 * 1024,
-	.period_bytes_min = 1024,
-	.period_bytes_max = 64 * 1024,
-	.periods_min      = 2,
-	.periods_max      = 16,
-};
-
+/*
+ * M245: refuse, rather than hang.
+ *
+ * Nothing ever advances this device's hardware pointer - the card's PCM
+ * address, ownership and completion protocol is not known (see the top of this
+ * file) - so a capture that opened successfully never delivered a period, and
+ * every ALSA client that tried blocked indefinitely. Until the protocol is
+ * reverse engineered the node exists only so the card is visible, and opening
+ * it fails immediately with a reason.
+ */
 static int mz0380_pcm_open(struct snd_pcm_substream *ss)
 {
 	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
 
-	ss->runtime->hw = mz0380_pcm_hw;
-	pcm->substream = ss;
-	pcm->hw_ptr_bytes = 0;
-	return 0;
+	dev_info_ratelimited(&dev->pci->dev,
+			     "HDMI audio capture is not implemented yet - the card's PCM transport is not reverse engineered\n");
+	return -ENODEV;
 }
 
 static int mz0380_pcm_close(struct snd_pcm_substream *ss)
@@ -130,57 +114,6 @@ static const struct snd_pcm_ops mz0380_pcm_ops = {
 	.pointer   = mz0380_pcm_pointer,
 };
 
-void mz0380_audio_period_elapsed(struct mz0380_dev *dev)
-{
-	struct mz0380_pcm *pcm = dev->snd_pcm;
-	struct snd_pcm_substream *ss;
-	struct mz0380_ring *r = &dev->audio_ring;
-	u32 tail;
-	size_t produced;
-	void *dst;
-
-	if (!pcm || !pcm->substream)
-		return;
-	ss = pcm->substream;
-
-	tail = mz_cfg_read(dev, r->tail_reg);
-
-	while (r->head != tail) {
-		void *src = (u8 *)r->buf + (size_t)r->head * r->entry_size;
-		u32 nbytes = *(u32 *)(src + MZ0380_DESC_BYTECOUNT_OFFSET);
-
-		if (nbytes == 0 || nbytes > r->entry_size)
-			goto advance;
-
-		produced = nbytes;
-
-		if (pcm->hw_ptr_bytes + produced <= pcm->buffer_bytes) {
-			dst = ss->runtime->dma_area + pcm->hw_ptr_bytes;
-			memcpy(dst, (u8 *)src + MZ0380_DESC_PAYLOAD_OFFSET,
-			       produced);
-			pcm->hw_ptr_bytes += produced;
-		} else {
-			size_t first = pcm->buffer_bytes - pcm->hw_ptr_bytes;
-			size_t rest  = produced - first;
-			dst = ss->runtime->dma_area + pcm->hw_ptr_bytes;
-			memcpy(dst,
-			       (u8 *)src + MZ0380_DESC_PAYLOAD_OFFSET,
-			       first);
-			memcpy(ss->runtime->dma_area,
-			       (u8 *)src + MZ0380_DESC_PAYLOAD_OFFSET + first,
-			       rest);
-			pcm->hw_ptr_bytes = rest;
-		}
-
-advance:
-		r->head = (r->head + 1) % r->nr_entries;
-		mz_cfg_write(dev, r->head_reg, r->head);
-	}
-
-	snd_pcm_period_elapsed(ss);
-}
-EXPORT_SYMBOL_GPL(mz0380_audio_period_elapsed);
-
 int mz0380_audio_register(struct mz0380_dev *dev)
 {
 	struct snd_card *card;
@@ -235,7 +168,6 @@ fail_card:
 	dev->snd_pcm  = NULL;
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_audio_register);
 
 void mz0380_audio_unregister(struct mz0380_dev *dev)
 {
@@ -249,6 +181,5 @@ void mz0380_audio_unregister(struct mz0380_dev *dev)
 	dev->snd_pcm = NULL;
 	dev->audio_registered = false;
 }
-EXPORT_SYMBOL_GPL(mz0380_audio_unregister);
 
 #endif /* CONFIG_SND */

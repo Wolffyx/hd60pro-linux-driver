@@ -80,7 +80,6 @@ void mz0380_mailbox_scan(struct mz0380_dev *dev)
 	}
 	pr_info("%s: mailbox scan done\n", dev->name);
 }
-EXPORT_SYMBOL_GPL(mz0380_mailbox_scan);
 
 static void mz0380_mb_snapshot_reply(struct mz0380_dev *dev)
 {
@@ -148,7 +147,6 @@ void mz0380_credit_rearm(struct mz0380_dev *dev)
 	mz_mmio_write(dev, MZ0380_MB_DOORBELL, MZ0380_MB_INT_ACK);
 	spin_unlock_irqrestore(&dev->event_lock, flags);
 }
-EXPORT_SYMBOL_GPL(mz0380_credit_rearm);
 
 /* dev->cmd_lock must remain held until any opcode-specific late reply is read. */
 static int mz0380_send_command_locked(struct mz0380_dev *dev, u32 opcode,
@@ -195,8 +193,9 @@ static int mz0380_send_command_locked(struct mz0380_dev *dev, u32 opcode,
 		if ((stale && stale != U32_MAX) ||
 		    mz_cfg_read(dev, MZ0380_CFG_INT_FLAG) == 1) {
 			mz0380_mb_ack_event(dev);
-			pr_info("%s: drained stale EVENT=0x%08x before command 0x%x\n",
-				dev->name, stale, opcode);
+			dev_dbg(&dev->pci->dev,
+				"drained stale EVENT=0x%08x before command 0x%x\n",
+				stale, opcode);
 		}
 		/* Retire an ISR which observed the old EVENT before the drain. */
 		if (dev->irq_requested)
@@ -274,8 +273,10 @@ static int mz0380_send_command_locked(struct mz0380_dev *dev, u32 opcode,
 
 				/* Snapshot frame-bearing lanes before the ACK clears EVENT. */
 				mz0380_mb_ack_event(dev);
-				pr_info("%s: EVENT=0x%08x during command 0x%x (%s), acked\n",
-					dev->name, event, opcode,
+				/* M245: every command posts one; dynamic debug. */
+				dev_dbg(&dev->pci->dev,
+					"EVENT=0x%08x during command 0x%x (%s), acked\n",
+					event, opcode,
 					cmd_done ? "cmd-done" : "other");
 				if (cmd_done) {
 					done = true;
@@ -367,7 +368,6 @@ int mz0380_send_command_reply(struct mz0380_dev *dev, u32 opcode,
 	mutex_unlock(&dev->cmd_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_send_command_reply);
 
 int mz0380_send_command(struct mz0380_dev *dev, u32 opcode,
 			const u32 *params, unsigned int nparams,
@@ -384,7 +384,6 @@ int mz0380_send_command(struct mz0380_dev *dev, u32 opcode,
 	mutex_unlock(&dev->cmd_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_send_command);
 
 /*
  * Post-boot handshake (Windows FUN_140278bb0): program the BAR5 notify
@@ -396,7 +395,12 @@ EXPORT_SYMBOL_GPL(mz0380_send_command);
  */
 int mz0380_card_init(struct mz0380_dev *dev)
 {
-	resource_size_t bar0 = pci_resource_start(dev->pci, 0);
+	/*
+	 * M245: the card is told where BAR0 is as the PCIe BUS sees it, which
+	 * is what the card DMAs to - not the CPU physical address, which differs
+	 * behind a translating host bridge.
+	 */
+	pci_bus_addr_t bar0 = pci_bus_address(dev->pci, 0);
 	unsigned int attempt;
 	unsigned long started = jiffies;
 	unsigned long deadline = started +
@@ -404,6 +408,17 @@ int mz0380_card_init(struct mz0380_dev *dev)
 	u32 init_reply[2] = { 0 };
 	u32 status = 0;
 	int ret = -ETIMEDOUT;
+
+	/*
+	 * The notify pointers are 32 bits wide. A firmware that places BAR0
+	 * above 4 GiB (Above-4G decoding, resizable BAR) leaves the card no way
+	 * to reach its own mailbox, and the handshake below then times out with
+	 * nothing to say why - so say why.
+	 */
+	if (upper_32_bits(bar0))
+		dev_err(&dev->pci->dev,
+			"BAR0 is at bus address 0x%llx, above 4 GiB; the card's notify pointers are 32-bit, so the handshake cannot work. Disable Above-4G decoding / resizable BAR for this slot, or move the card\n",
+			(unsigned long long)bar0);
 
 	mz_cfg_write(dev, MZ0380_CFG_NOTIFY_PTR0, lower_32_bits(bar0) + 0x04);
 	mz_cfg_write(dev, MZ0380_CFG_NOTIFY_PTR1, lower_32_bits(bar0) + 0x5f);
@@ -473,7 +488,6 @@ int mz0380_card_init(struct mz0380_dev *dev)
 		status);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mz0380_card_init);
 
 /*
  * Peripheral register file access via mailbox opcodes 0x1a/0x1b
@@ -555,7 +569,6 @@ out_unlock:
 	mutex_unlock(&dev->cmd_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mz0380_periph_read);
 
 int mz0380_periph_write(struct mz0380_dev *dev, u8 chip, u8 reg, u32 val)
 {
@@ -564,4 +577,3 @@ int mz0380_periph_write(struct mz0380_dev *dev, u8 chip, u8 reg, u32 val)
 	return mz0380_send_command(dev, MZ0380_CMD_REG_WRITE, params, 3,
 				   NULL, 1000);
 }
-EXPORT_SYMBOL_GPL(mz0380_periph_write);

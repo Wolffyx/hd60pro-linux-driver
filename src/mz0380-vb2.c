@@ -99,6 +99,23 @@ static int mz0380_start_streaming(struct vb2_queue *vq, unsigned int count)
 	}
 
 	/*
+	 * M245: every path below talks to the card through the mailbox. After a
+	 * resume the handshake runs asynchronously, and a card whose handshake
+	 * failed at probe is deaf; either way, say so here instead of letting a
+	 * command time out halfway through a pipeline start.
+	 */
+	if (dev->fw_state != MZ0380_FW_STATE_READY) {
+		dev_warn(&dev->pci->dev,
+			 "start_streaming: card handshake not complete (state %s)\n",
+			 mz0380_fw_state_name(dev->fw_state));
+		ret = -EAGAIN;
+		goto error;
+	}
+
+	/* M245: see mz0380_s_ctrl - held for exactly the streaming session. */
+	mz0380_encoder_ctrls_grab(dev, true);
+
+	/*
 	 * A persistent H.264 pipeline is already producing into the module-owned
 	 * window-1 ring.  Reopening OBS attaches only the VB2 queue: sending even
 	 * SET_ENC/SET_BUF/START here is wrong because tinyvenc is no longer in its
@@ -308,6 +325,7 @@ static int mz0380_start_streaming(struct vb2_queue *vq, unsigned int count)
 	return 0;
 
 error:
+	mz0380_encoder_ctrls_grab(dev, false);
 	{
 		struct mz0380_vb_buffer *buf, *tmp;
 		unsigned long flags;
@@ -334,6 +352,7 @@ static void mz0380_stop_streaming(struct vb2_queue *vq)
 	 * verbose dma_stop still runs for its end-of-stream diagnostics dump.
 	 */
 	dev->streaming = false;
+	mz0380_encoder_ctrls_grab(dev, false);
 	mz0380_signal_recovery_stop(dev);
 	mz0380_nosg_capture_stop(dev);
 	if (!mz0380_stream_nosg && mz0380_h264_probe &&

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * MZ0380 base, diagnostics, DMA, and stream module parameters.
+ *
+ * M245: permissions say when a parameter takes effect. 0444 means load time
+ * only: anything that decides what is allocated at probe, which IOVAs the card
+ * is told to write to, the pipeline's lifetime, or which format the node
+ * advertises. Those were writable through sysfs, where changing one after the
+ * buffers existed made the card target addresses computed with a different
+ * offset than the one they were mapped at. 0644 remains for values that are
+ * re-read at the next stream start or are purely diagnostic.
  */
 
 #include "mz0380-internal.h"
@@ -455,7 +463,7 @@ MODULE_PARM_DESC(setvic_once,
  * module removal; a later STREAMON attaches without sending any card command.
  */
 bool mz0380_persistent_h264 = true;
-module_param_named(persistent_h264, mz0380_persistent_h264, bool, 0644);
+module_param_named(persistent_h264, mz0380_persistent_h264, bool, 0444);
 MODULE_PARM_DESC(persistent_h264,
 		 "keep one H.264 VIC/encoder pipeline alive across V4L2 STREAMOFF/STREAMON (def:1; H264PROBE path only)");
 
@@ -510,7 +518,7 @@ MODULE_PARM_DESC(poll_drain_credit,
  * 20 ms is what every successful capture since M111 has used.
  */
 unsigned int mz0380_poll_drain_ms;	/* M216: 0, the fw=7 default */
-module_param_named(poll_drain_ms, mz0380_poll_drain_ms, uint, 0644);
+module_param_named(poll_drain_ms, mz0380_poll_drain_ms, uint, 0444);
 MODULE_PARM_DESC(poll_drain_ms,
 		 "M111: poll the stream buffers every N ms and deliver any frame the card has already written, instead of waiting for a completion event that never arrives. DEFAULT 0 since M216: the fw=7 encoded path uses the window-1 completion ring and does not need polling. Set 20 only for the legacy fw=5 raw poll-drain path, which delivers nothing without it (M166)");
 
@@ -641,7 +649,7 @@ MODULE_PARM_DESC(start_delay_ms,
  * default so real capture is used. Writable at runtime.
  */
 bool mz0380_stream_nosg;
-module_param_named(stream_nosg, mz0380_stream_nosg, bool, 0644);
+module_param_named(stream_nosg, mz0380_stream_nosg, bool, 0444);
 MODULE_PARM_DESC(stream_nosg,
 		 "SET_VIC is_nosg flag: 1 = force the card's fake-frame (test-pattern) generator, bypassing real BT1120 capture; diagnostic bisection lever (def:0)");
 
@@ -673,7 +681,7 @@ MODULE_PARM_DESC(nosg_frame_timeout_ms,
  * Diagnostic only; leave off for normal operation. Writable at runtime.
  */
 bool mz0380_buf_pair_swap;
-module_param_named(buf_pair_swap, mz0380_buf_pair_swap, bool, 0644);
+module_param_named(buf_pair_swap, mz0380_buf_pair_swap, bool, 0444);
 MODULE_PARM_DESC(buf_pair_swap,
 		 "M25 probe: swap the op2 channels[] slot word order to {low32, high32} (def:0 = {high32, low32})");
 
@@ -692,12 +700,12 @@ MODULE_PARM_DESC(buf_pair_swap,
  * the domain aperture), and every mapping is checked for a collision first.
  */
 bool mz0380_dma_iova_remap = true;
-module_param_named(dma_iova_remap, mz0380_dma_iova_remap, bool, 0644);
+module_param_named(dma_iova_remap, mz0380_dma_iova_remap, bool, 0444);
 MODULE_PARM_DESC(dma_iova_remap,
 		 "M26: place each stream buffer at its own 4GiB-aligned IOVA via iommu_map, so the card's high32-only outbound target lands in it (def:1)");
 
 unsigned long long mz0380_dma_iova_base = 0x100000000ULL;
-module_param_named(dma_iova_base, mz0380_dma_iova_base, ullong, 0644);
+module_param_named(dma_iova_base, mz0380_dma_iova_base, ullong, 0444);
 MODULE_PARM_DESC(dma_iova_base,
 		 "M26: base IOVA for the remapped stream buffers, must be 4GiB-aligned; buffer i lands at base + (i << 32) (def:0x100000000)");
 
@@ -717,12 +725,12 @@ MODULE_PARM_DESC(dma_iova_base,
  * says which; the winner becomes the default.
  */
 unsigned long long mz0380_dma_iova_offset;
-module_param_named(dma_iova_offset, mz0380_dma_iova_offset, ullong, 0644);
+module_param_named(dma_iova_offset, mz0380_dma_iova_offset, ullong, 0444);
 MODULE_PARM_DESC(dma_iova_offset,
 		 "M27: shift each remapped stream buffer up by this many bytes within its 4GiB slot, to meet the card's aperture offset (def:0)");
 
 unsigned int mz0380_set_buf_stride = MZ0380_STREAM_BUF_STRIDE;
-module_param_named(set_buf_stride, mz0380_set_buf_stride, uint, 0644);
+module_param_named(set_buf_stride, mz0380_set_buf_stride, uint, 0444);
 MODULE_PARM_DESC(set_buf_stride,
 		 "M27: the stride word sent in SET_BUF cmd[0x8]; the card appears to place buffer n at aperture offset n*stride (def:0x80000)");
 
@@ -744,7 +752,7 @@ MODULE_PARM_DESC(set_buf_stride,
  * hatch, defaulting to 0.
  */
 unsigned int mz0380_card_frame_offset;
-module_param_named(card_frame_offset, mz0380_card_frame_offset, uint, 0644);
+module_param_named(card_frame_offset, mz0380_card_frame_offset, uint, 0444);
 MODULE_PARM_DESC(card_frame_offset,
 		 "M29: bytes the card adds to the advertised target before writing a frame; buffers are mapped this far above the address sent in SET_BUF. Measured 0 on hw (def:0)");
 
@@ -785,7 +793,7 @@ module_param_named(mst_ad, mz0380_mst_ad, uint, 0644);
 MODULE_PARM_DESC(mst_ad, "M94: MST3367 BANK0 0xad value - Windows sends 0 or 1 (def:0)");
 
 bool mz0380_set_buf_op8;
-module_param_named(set_buf_op8, mz0380_set_buf_op8, bool, 0644);
+module_param_named(set_buf_op8, mz0380_set_buf_op8, bool, 0444);
 MODULE_PARM_DESC(set_buf_op8,
 		 "M92: also send SET_BUF op 0x08 after op 0x02, as Windows always does (def:0)");
 
@@ -796,7 +804,7 @@ MODULE_PARM_DESC(set_buf_op8,
  * discriminator: H.264 window 1/op04 is deliberately forbidden.
  */
 bool mz0380_raw_bank_probe;
-module_param_named(raw_bank_probe, mz0380_raw_bank_probe, bool, 0644);
+module_param_named(raw_bank_probe, mz0380_raw_bank_probe, bool, 0444);
 MODULE_PARM_DESC(raw_bank_probe,
 		 "M209: raw-only Windows-exact independent op02/op08 banks (requires h264_probe=0 + IOVA remap; forbids op04; def:0)");
 
@@ -820,7 +828,7 @@ MODULE_PARM_DESC(raw_bank_probe,
  * present).  It changes exactly one variable against M209.
  */
 bool mz0380_raw_probe_enc_tail;
-module_param_named(raw_probe_enc_tail, mz0380_raw_probe_enc_tail, bool, 0644);
+module_param_named(raw_probe_enc_tail, mz0380_raw_probe_enc_tail, bool, 0444);
 MODULE_PARM_DESC(raw_probe_enc_tail,
 		 "M210: with raw_bank_probe, send the Windows encoder tail (SET_ENC_PARAMS x2 + SET_PREVIEW_PARAMS) and suppress op06 (def:0)");
 
@@ -841,7 +849,7 @@ MODULE_PARM_DESC(raw_probe_enc_tail,
  * run is scored from.
  */
 bool mz0380_raw_probe_allow_30;
-module_param_named(raw_probe_allow_30, mz0380_raw_probe_allow_30, bool, 0644);
+module_param_named(raw_probe_allow_30, mz0380_raw_probe_allow_30, bool, 0444);
 MODULE_PARM_DESC(raw_probe_allow_30,
 		 "Permit the bounded raw discriminators to run on a progressive 1080p30 source; a documented deviation from the Windows-confirmed 1080p60 (def:0)");
 
@@ -870,6 +878,6 @@ MODULE_PARM_DESC(raw_probe_allow_30,
  * raw source at all and the search moves back to the Windows binary.
  */
 bool mz0380_raw_bank_observe;
-module_param_named(raw_bank_observe, mz0380_raw_bank_observe, bool, 0644);
+module_param_named(raw_bank_observe, mz0380_raw_bank_observe, bool, 0444);
 MODULE_PARM_DESC(raw_bank_observe,
 		 "M211: register and poison the op02/op08 raw banks alongside a live H.264 capture and report their extents at stop (requires h264_probe=1 + IOVA remap; def:0) LOAD-TIME ONLY: the banks are allocated in mz0380_dma_setup() at probe, so setting this through sysfs on a loaded module makes stream start fail with -ENODEV");

@@ -99,7 +99,13 @@ static int mz0380_query_signal_internal(struct mz0380_dev *dev,
 
 	dev->signal_locked = true;
 	dev->detected_timings = *out;
-	dev->set_timings = *out;	/* M171: G tracks reality absent an S */
+	/*
+	 * M171: G tracks reality absent an S. M245: and ONLY absent an S - this
+	 * used to overwrite set_timings on every detection, so any QUERY after
+	 * an S_DV_TIMINGS made G return something the application never set.
+	 */
+	if (!dev->timings_set_by_user)
+		dev->set_timings = *out;
 	dev->last_good_timings = *out;      /* M65: survives later failures */
 	dev->last_good_stamp = jiffies;
 	dev->have_last_good = true;
@@ -121,7 +127,6 @@ int mz0380_query_signal(struct mz0380_dev *dev,
 {
 	return mz0380_query_signal_internal(dev, out, true, true);
 }
-EXPORT_SYMBOL_GPL(mz0380_query_signal);
 
 void mz0380_signal_event(struct mz0380_dev *dev)
 {
@@ -132,7 +137,6 @@ void mz0380_signal_event(struct mz0380_dev *dev)
 
 	v4l2_event_queue(&dev->vdev, &ev);
 }
-EXPORT_SYMBOL_GPL(mz0380_signal_event);
 
 static bool mz0380_pipeline_matches_signal(struct mz0380_dev *dev,
 					    const struct v4l2_dv_timings *live)
@@ -410,6 +414,7 @@ int mz0380_query_dv_timings(struct file *file, void *fh,
 				   struct v4l2_dv_timings *t)
 {
 	struct mz0380_dev *dev = video_drvdata(file);
+	int ret;
 
 	/*
 	 * Do not drive the receiver's serialized mailbox-I2C path while video is
@@ -423,13 +428,28 @@ int mz0380_query_dv_timings(struct file *file, void *fh,
 	if (READ_ONCE(dev->streaming) || READ_ONCE(dev->pipeline_running)) {
 		if (!dev->signal_locked || !dev->have_last_good) {
 			*t = mz0380_no_signal;
-			return -ENOLCK;
+			return -ENOLINK;
 		}
 		*t = dev->detected_timings;
 		return 0;
 	}
 
-	return mz0380_query_signal(dev, t);
+	/*
+	 * M245: V4L2's error codes for this ioctl, not the driver's own.
+	 * Internally -ENOLCK means "the receiver is locked to nothing" and
+	 * -EAGAIN "the timing is not stable yet". The ioctl spells those
+	 * -ENOLINK and -ENOLCK respectively, and applications branch on the
+	 * difference: ENOLINK means wait for a source, ENOLCK means ask again.
+	 */
+	ret = mz0380_query_signal(dev, t);
+	switch (ret) {
+	case -ENOLCK:
+		return -ENOLINK;
+	case -EAGAIN:
+		return -ENOLCK;
+	default:
+		return ret;	/* 0, -ERANGE, or a real I/O error */
+	}
 }
 
 /*
@@ -480,6 +500,7 @@ int mz0380_s_dv_timings(struct file *file, void *fh,
 		return -EBUSY;
 
 	dev->set_timings = *t;
+	dev->timings_set_by_user = true;
 
 	/*
 	 * M172: and the format follows the timings.

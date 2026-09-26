@@ -10,6 +10,6 @@
 #include "mz0380-internal.h"
 
 MODULE_DESCRIPTION("Driver for MZ0380 based capture cards");
-MODULE_AUTHOR("OpenAI");
+MODULE_AUTHOR("wolffyx");
 MODULE_LICENSE("GPL");	/* GPL-2.0-or-later; see COPYING */
 MODULE_VERSION("0.1.0");

@@ -142,9 +142,9 @@
  * PARAM3 (BAR0+0x10).
  */
 #define MZ0380_CMD_I2C_READ_S           0x1e  /* M69: block read twin of 0x1f;
-                                               * on NAK leaves the payload
-                                               * UNTOUCHED (clean NAK detector,
-                                               * unlike 0x1a which forces 0)   */
+					       * on NAK leaves the payload
+					       * UNTOUCHED (clean NAK detector,
+					       * unlike 0x1a which forces 0)   */
 #define MZ0380_CMD_REG_READ             0x1a
 #define MZ0380_CMD_REG_WRITE            0x1b
 
@@ -229,16 +229,16 @@
  * kept the MST3367 in reset and the I2C bus dead (M11-M15).
  */
 #define MZ0380_GPIO_HPD                 1     /* HDMI hot-plug detect. M69:
-                                               * ACTIVE-LOW on the Elgato board:
-                                               * win64 FUN_14024eeb8 computes
-                                               * pin1 = ~(arg>>4)&1, so HPD_ON
-                                               * drives the pin LOW. We had it
-                                               * inverted for the whole project. */
+					       * ACTIVE-LOW on the Elgato board:
+					       * win64 FUN_14024eeb8 computes
+					       * pin1 = ~(arg>>4)&1, so HPD_ON
+					       * drives the pin LOW. We had it
+					       * inverted for the whole project. */
 #define MZ0380_GPIO_EDID_MUX            2     /* M69: DDC path mux, only ever
-                                               * touched by the Windows EDID
-                                               * handler: 1 = local EDID store
-                                               * on the SoC's i2c-0, 0 = the
-                                               * passthrough/monitor side.     */
+					       * touched by the Windows EDID
+					       * handler: 1 = local EDID store
+					       * on the SoC's i2c-0, 0 = the
+					       * passthrough/monitor side.     */
 #define MZ0380_GPIO_RX_ENABLE           3     /* receiver / mux enable (=1)    */
 #define MZ0380_GPIO_RX_STRAP            8     /* companion reset/power strap   */
 #define MZ0380_GPIO_RX_RESET            9     /* MST3367 reset, ACTIVE-LOW     */

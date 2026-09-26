@@ -144,14 +144,17 @@ static u32 mz0380_raw_poison_dword(u32 idx)
 			      MZ0380_RAW_PROBE_BANK1_POISON);
 }
 
+size_t mz0380_raw_frame_bytes_for(u32 width, u32 height)
+{
+	if (!width || !height)
+		return MZ0380_RAW_PROBE_FRAME_SIZE;
+	return (size_t)ALIGN(width, 16) * height * 3 / 2;
+}
+
 size_t mz0380_raw_frame_bytes(struct mz0380_dev *dev)
 {
-	u32 w = dev->capture.width;
-	u32 h = dev->capture.height;
-
-	if (!w || !h)
-		return MZ0380_RAW_PROBE_FRAME_SIZE;
-	return (size_t)ALIGN(w, 16) * h * 3 / 2;
+	return mz0380_raw_frame_bytes_for(dev->capture.width,
+					  dev->capture.height);
 }
 
 /*
@@ -502,7 +505,6 @@ void mz0380_raw_copy_frame(struct mz0380_dev *dev, void *dst, const void *src,
 		return;
 	}
 }
-EXPORT_SYMBOL_GPL(mz0380_raw_copy_frame);
 
 void mz0380_raw_probe_sentinel_repoison(struct mz0380_dev *dev, u32 idx)
 {
@@ -660,7 +662,6 @@ void mz0380_extent_repoison(struct mz0380_dev *dev)
 	pr_info("%s: REPOISON: buffers re-filled, extents reset - any new extent growth = the card is still writing\n",
 		dev->name);
 }
-EXPORT_SYMBOL_GPL(mz0380_extent_repoison);
 
 void mz0380_extent_watch_stop(struct mz0380_dev *dev)
 {
@@ -846,7 +847,6 @@ void mz0380_dma_teardown(struct mz0380_dev *dev)
 	mz0380_h264_bufs_free(dev);
 	mz0380_stream_bufs_free(dev);
 }
-EXPORT_SYMBOL_GPL(mz0380_dma_teardown);
 
 /*
  * Frames per second of a detected timing, rounded to the nearest whole frame

@@ -619,7 +619,7 @@ int mz0380_proc_hdmi_show(struct seq_file *m, void *v)
 	seq_puts(m, "  selects confirmed V4L2/property-201 HDMI index 0, reloads EDID, and pulses HPD.\n");
 	seq_puts(m, "  It does not send SET_VIC or start the encoder; those happen only at stream start.\n");
 	seq_puts(m, "  Legacy numeric forms accept property index 0 or raw HDMI code 2 only; geometry is ignored.\n");
-	seq_puts(m, "  Raw DVI/component/SDI/auto input codes are rejected. Other commands: csc, edid, hpd, watch, ramtest, wscan, edidhunt, gpiodump, i2cscan, edidburn.\n");
+	seq_puts(m, "  Raw DVI/component/SDI/auto input codes are rejected. Other commands: csc, edid, hpd, watch, ramtest, wscan, edidhunt, gpiodump, i2cscan.\n");
 	seq_puts(m, "\nsink chain read-back (M43: write returns prove nothing - the\n"
 		    "firmware forces the I2C result to 0 on a NAK, so verify by reading):\n");
 	mutex_lock(&devlist);
@@ -758,22 +758,6 @@ ssize_t mz0380_proc_hdmi_write(struct file *file,
 		return count;
 	}
 
-	/* M51: "edidburn [sda] [scl] [addr7]" burn+verify EDID into the EEPROM */
-	if (!strncmp(cmd, "edidburn", 8)) {
-		unsigned int sda = 13, scl = 12, addr = 0x50;
-
-		sscanf(cmd, "edidburn %u %u %x", &sda, &scl, &addr);
-		kfree(cmd);
-		if (sda > 31 || scl > 31 || sda == scl || addr > 0x7f)
-			return -EINVAL;
-		mutex_lock(&devlist);
-		list_for_each_entry(dev, &mz0380_devlist, devlist)
-			mz0380_i2cbb_edid_burn(dev, sda, scl, addr);
-		mutex_unlock(&devlist);
-		*ppos += count;
-		return count;
-	}
-
 	/* M45: "watch [secs]" logs the detect block live to dmesg */
 	if (!strncmp(cmd, "watch", 5)) {
 		unsigned int secs = 20;
@@ -799,7 +783,7 @@ ssize_t mz0380_proc_hdmi_write(struct file *file,
 	 * request, so reject it and name the vocabulary instead.
 	 */
 	if (*cmd && !(*cmd >= '0' && *cmd <= '9')) {
-		pr_info("mz0380: unknown /proc/mz0380-hdmi command '%s' - known: hdmi, ramtest, wscan, edidhunt, gpiodump, i2cscan, edidburn, hpd, edid, watch, or legacy '0|2 [w h fps]'\n",
+		pr_info("mz0380: unknown /proc/mz0380-hdmi command '%s' - known: hdmi, ramtest, wscan, edidhunt, gpiodump, i2cscan, hpd, edid, watch, or legacy '0|2 [w h fps]'\n",
 			cmd);
 		kfree(cmd);
 		return -EINVAL;

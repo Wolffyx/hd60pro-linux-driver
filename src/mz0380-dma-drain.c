@@ -830,8 +830,8 @@ mz0380_drain_raw_deliver(struct mz0380_dev *dev,
 		if (mz0380_raw_deliver_slot(dev, snapshot, slot)) {
 			dev->raw_next_slot = (slot + 1) %
 					     MZ0380_STREAM_NR_BUFS;
-			pr_info_ratelimited("%s: raw scan landed=0x%x took slot %u (multi=%llu torn=%llu unfilled=%llu)\n",
-					    dev->name, landed, slot,
+			dev_dbg_ratelimited(&dev->pci->dev, "raw scan landed=0x%x took slot %u (multi=%llu torn=%llu unfilled=%llu)\n",
+					    landed, slot,
 					    (unsigned long long)dev->raw_multi_landed,
 					    (unsigned long long)dev->raw_frames_torn,
 					    (unsigned long long)dev->raw_incomplete_tail);
@@ -1331,13 +1331,6 @@ void mz0380_dma_drain_video(struct mz0380_dev *dev)
 		return;
 	}
 }
-EXPORT_SYMBOL_GPL(mz0380_dma_drain_video);
-
-void mz0380_dma_drain_audio(struct mz0380_dev *dev)
-{
-	/* audio DMA path is milestone-C follow-up; no-op for now */
-}
-EXPORT_SYMBOL_GPL(mz0380_dma_drain_audio);
 
 void mz0380_drain_work_fn(struct work_struct *w)
 {
