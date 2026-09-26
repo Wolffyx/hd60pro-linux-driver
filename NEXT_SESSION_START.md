@@ -1,14 +1,37 @@
 # NEXT SESSION START
 
-_Last updated 2026-09-01. Full history in **RE_FINDINGS.md**. This file is the
+_Last updated 2026-09-27. Full history in **RE_FINDINGS.md**. This file is the
 handoff only. Everything below was verified on hardware unless it says
 otherwise._
 
-## State (2026-09-01): raw capture works and presents as a camera
+## State (2026-09-27): video works and is clean; HDMI audio transport proven
 
 1920x1080 uncompressed through V4L2, ~50-60 fps, no module parameters needed.
 The node enumerates `YU12`, `NV12`, `YV12`, `H264` in that order and is named
-`HD60 Pro HDMI capture`.
+`HD60 Pro HDMI capture`. **v4l2-compliance 48/48, 0 warnings** (48, not 148:
+the node now lists one input, and compliance repeats ~25 tests per input).
+
+Since 2026-09-01, all committed and pushed (`c3025f9` on `main`):
+
+- **M243** brightness steps are the camera's auto exposure (same steps
+  through a USB capture card). Closed.
+- **M244** ENUM_FRAMESIZES/FRAMEINTERVALS missed NV12/YV12; the M238 chroma
+  test is live and fires on genuine mid-fill slots (exact 32/32 matches).
+- **M245** whole-driver review: TRY_FMT no longer writes live state, S_FMT is
+  -EBUSY while buffers exist, no use-after-free on unbind, IDA card numbers,
+  root-only hardware /proc files, bitrate/GOP controls that reach the encoder
+  (others removed), POWER_PRESENT, one input, `.shutdown` + suspend/resume,
+  load-time DMA params, 32-bit DMA mask under the IOVA scheme, EDID burn
+  removed. Hardware-verified except suspend/resume and `.shutdown`.
+- **M246** HDMI audio: op 0x03 window (4 x 4 KiB), EVENT[19:16] + BAR0 0x4c,
+  SET_AIC bytes 4/5 corrected so the card launches its capture app, real ALSA
+  device. Transport proven (~47 x 4096 B/s, ALSA delivers 48 kHz stereo);
+  samples were all zero because the source has no audio. Opt-in:
+  `EXTRA="enable_audio=1"`.
+
+Card state at the end of the session: three `capture_app_infinite` daemons
+left running from the audio tests (only a power cycle ends them); spawn tally
+5 on that power cycle. **Cold boot before the next hardware run.**
 
 ### Closed this session, confirmed on hardware
 
