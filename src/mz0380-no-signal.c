@@ -1,80 +1,131 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Host-side H.264 NO SIGNAL presentation.
+ * Host-side NO SIGNAL picture.
  *
- * Hardware M114 established that the card produces no access unit at all
- * when the MST3367 has no lock. A self-contained IDR is therefore replayed
- * from host memory while VB2 remains attached. It costs no mailbox command,
- * DMA ownership change, or encoder spawn. The embedded access unit is a
- * 1920x1080 High Profile level-4.2 Annex-B frame containing AUD/SPS/PPS/IDR.
- * Its centred 320x240 picture is the card's original NOSG_LOGO_Y, extracted
- * from the user's local tinyvenc5 dump and identity-checked by SHA-256.
+ * Hardware M114 established that the card produces no frame at all while the
+ * MST3367 has no lock, so a consumer would otherwise sit on its last picture
+ * (or time out, as browser and conferencing apps do) whenever the source is
+ * unplugged or has not started yet. The driver fills that gap itself, at
+ * MZ0380_NO_SIGNAL_FPS, in whatever format the node is delivering:
+ *
+ *   H.264  a self-contained 1920x1080 IDR replayed from host memory; its
+ *          centred 320x240 picture is the card's own NOSG_LOGO_Y, extracted
+ *          from tinyvenc5 and identity-checked by SHA-256.
+ *   raw    a black frame at the negotiated geometry with NO SIGNAL written
+ *          across it (M247; before that a raw node simply stalled).
+ *
+ * Neither costs a mailbox command, a DMA ownership change or an encoder spawn.
  */
 
-#include "mz0380-internal.h"
+#include "mz0380.h"
 #include "mz0380-no-signal-data.h"
+
+#define MZ0380_GLYPH_W		5
+#define MZ0380_GLYPH_H		7
+#define MZ0380_TEXT_Y		200	/* luma of the lettering */
+#define MZ0380_BLACK_Y		16
+#define MZ0380_NEUTRAL_UV	128
+
+/* "NO SIGNAL" in a 5x7 font, one byte per row, bit 4 = leftmost column. */
+static const u8 mz0380_no_signal_text[][MZ0380_GLYPH_H] = {
+	{ 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 },	/* N */
+	{ 0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e },	/* O */
+	{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },	/*   */
+	{ 0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e },	/* S */
+	{ 0x0e, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0e },	/* I */
+	{ 0x0e, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0f },	/* G */
+	{ 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 },	/* N */
+	{ 0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11 },	/* A */
+	{ 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f },	/* L */
+};
 
 static unsigned long mz0380_no_signal_interval(void)
 {
-	unsigned int fps = clamp_t(unsigned int, mz0380_no_signal_fps, 1, 10);
-
-	return max_t(unsigned long, 1, msecs_to_jiffies(DIV_ROUND_UP(1000, fps)));
+	return max_t(unsigned long, 1,
+		     msecs_to_jiffies(1000 / MZ0380_NO_SIGNAL_FPS));
 }
 
 /*
- * M225: the placeholder is an H.264 access unit, so it may only ever be handed
- * to a node that is delivering H.264.
- *
- * S_FMT can put the node in I420 (M218) while every condition that activates
- * this replay still holds. Raw delivery REQUIRES the encoder to keep running -
- * that is what makes the card produce raw at all (M210b) - so the persistent
- * pipeline reattachment in start_streaming and every recovery blip in the
- * receiver monitor activate the placeholder exactly as they would for an
- * encoded session. Nothing downstream of that consulted deliver_raw. The work
- * then took buffers off the shared queue at up to no_signal_fps and returned
- * them holding a few kilobytes of Annex-B with the payload length to match,
- * which an I420 consumer renders as a black or garbage frame.
- *
- * That is what "flicker" on the raw formats is: not stutter, and not a torn
- * picture - the delivered raw frames were measured clean - but correct frames
- * interrupted by placeholder frames wearing the wrong pixel format. It never
- * showed on H264 because there the placeholder is exactly what the node
- * promised. In raw the queue simply holds instead; a stalled last frame is
- * what a consumer expects while a source is unlocked.
+ * Black limited-range I420/YV12/NV12 - neutral chroma is 128 in every layout,
+ * so only the luma plane differs - with the lettering scaled to about a third
+ * of the picture width and centred.
  */
-static bool mz0380_no_signal_replay_allowed(struct mz0380_dev *dev)
+static void mz0380_no_signal_render_raw(void *dst, u32 width, u32 height)
 {
-	return mz0380_h264_probe && !READ_ONCE(dev->deliver_raw);
+	const unsigned int chars = ARRAY_SIZE(mz0380_no_signal_text);
+	const unsigned int cols = chars * (MZ0380_GLYPH_W + 1) - 1;
+	size_t frame = mz0380_raw_frame_bytes_for(width, height);
+	size_t luma = frame / 3 * 2;
+	u32 stride = luma / height;
+	unsigned int scale = max(1u, width / 3 / cols);
+	unsigned int x0 = (width - min(width, cols * scale)) / 2;
+	unsigned int y0 = (height - min(height, MZ0380_GLYPH_H * scale)) / 2;
+	unsigned int c, row, bit, line;
+	u8 *y = dst;
+
+	memset(y, MZ0380_BLACK_Y, luma);
+	memset(y + luma, MZ0380_NEUTRAL_UV, frame - luma);
+
+	for (c = 0; c < chars; c++) {
+		for (row = 0; row < MZ0380_GLYPH_H; row++) {
+			for (bit = 0; bit < MZ0380_GLYPH_W; bit++) {
+				unsigned int x = x0 + (c * (MZ0380_GLYPH_W + 1) +
+						       bit) * scale;
+
+				if (!(mz0380_no_signal_text[c][row] &
+				      BIT(MZ0380_GLYPH_W - 1 - bit)))
+					continue;
+				if (x + scale > width)
+					continue;
+				for (line = 0; line < scale; line++) {
+					u32 py = y0 + row * scale + line;
+
+					if (py < height)
+						memset(y + (size_t)py * stride + x,
+						       MZ0380_TEXT_Y, scale);
+				}
+			}
+		}
+	}
 }
 
-static void mz0380_no_signal_work_fn(struct work_struct *work)
+/*
+ * M225: a raw node shows the placeholder only once live raw frames have
+ * stopped. The placeholder is also activated while a reattachment is being
+ * validated, with live frames still flowing, and interleaving the two is a
+ * visible flicker.
+ */
+static bool mz0380_raw_source_live(struct mz0380_dev *dev)
 {
-	struct mz0380_dev *dev = container_of(to_delayed_work(work),
-					      struct mz0380_dev, no_signal_work);
-	struct mz0380_vb_buffer *vbuf = NULL;
+	unsigned long last = READ_ONCE(dev->raw_last_live);
+
+	return last && time_before(jiffies,
+				   last + msecs_to_jiffies(MZ0380_RAW_LIVE_MS));
+}
+
+/*
+ * The bytes a NO SIGNAL picture takes in the current format, or 0 if there is
+ * none to give: the H.264 one is a fixed 1080p access unit, and a decoder
+ * handed it in a 720p stream would be handed a different stream.
+ */
+static size_t mz0380_no_signal_len(struct mz0380_dev *dev)
+{
+	if (READ_ONCE(dev->deliver_raw))
+		return mz0380_raw_frame_bytes(dev);
+	if (dev->capture.width != 1920 || dev->capture.height != 1080)
+		return 0;
+	return mz0380_no_signal_h264_len;
+}
+
+static void mz0380_no_signal_deliver(struct mz0380_dev *dev)
+{
+	size_t len = mz0380_no_signal_len(dev);
+	struct mz0380_vb_buffer *vbuf;
 	unsigned long flags;
 	void *dst;
-	size_t plane;
 
-	mutex_lock(&dev->h264_delivery_lock);
-	if (!READ_ONCE(dev->streaming) ||
-	    !READ_ONCE(dev->no_signal_active) ||
-	    !mz0380_h264_probe)
-		goto out_unlock;
-
-	if (!mz0380_no_signal_replay_allowed(dev)) {
-		/*
-		 * The fix, and the measurement that justifies it. Every tick
-		 * counted here is one buffer the previous code took off the
-		 * queue and handed back holding H.264 while the node was in
-		 * I420. A raw session that shows this non-zero is the flicker
-		 * accounted for; one that shows zero while still flickering
-		 * says this diagnosis is wrong too, before another theory is
-		 * built on it.
-		 */
-		dev->no_signal_frames_suppressed++;
-		goto out_unlock;
-	}
+	if (!len)
+		return;
 
 	spin_lock_irqsave(&dev->buf_lock, flags);
 	vbuf = list_first_entry_or_null(&dev->buf_list,
@@ -84,38 +135,45 @@ static void mz0380_no_signal_work_fn(struct work_struct *work)
 	spin_unlock_irqrestore(&dev->buf_lock, flags);
 	if (!vbuf) {
 		dev->no_signal_frames_missed++;
-		goto out_unlock;
+		return;
 	}
 
 	dst = vb2_plane_vaddr(&vbuf->vb.vb2_buf, 0);
-	plane = vb2_plane_size(&vbuf->vb.vb2_buf, 0);
-	if (!dst || mz0380_no_signal_h264_len > plane) {
+	if (!dst || vb2_plane_size(&vbuf->vb.vb2_buf, 0) < len) {
 		dev->no_signal_frames_missed++;
 		vb2_set_plane_payload(&vbuf->vb.vb2_buf, 0, 0);
 		vb2_buffer_done(&vbuf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-		goto out_unlock;
+		return;
 	}
 
-	memcpy(dst, mz0380_no_signal_h264, mz0380_no_signal_h264_len);
-	vb2_set_plane_payload(&vbuf->vb.vb2_buf, 0,
-			      mz0380_no_signal_h264_len);
+	if (READ_ONCE(dev->deliver_raw)) {
+		mz0380_no_signal_render_raw(dst, dev->capture.width,
+					    dev->capture.height);
+		dev->no_signal_raw_frames++;
+	} else {
+		memcpy(dst, mz0380_no_signal_h264, len);
+		dev->no_signal_frames_delivered++;
+	}
+	vb2_set_plane_payload(&vbuf->vb.vb2_buf, 0, len);
 	vbuf->vb.vb2_buf.timestamp = ktime_get_ns();
-	vbuf->vb.field = V4L2_FIELD_NONE;
+	vbuf->vb.field = mz0380_current_field(dev);
 	vbuf->vb.sequence = dev->video_sequence++;
-	vbuf->vb.flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
-			   V4L2_BUF_FLAG_BFRAME);
+	vbuf->vb.flags &= ~(V4L2_BUF_FLAG_PFRAME | V4L2_BUF_FLAG_BFRAME);
 	vbuf->vb.flags |= V4L2_BUF_FLAG_KEYFRAME;
-	dev->no_signal_frames_delivered++;
 	vb2_buffer_done(&vbuf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+}
 
-out_unlock:
-	mutex_unlock(&dev->h264_delivery_lock);
-	/*
-	 * Rescheduled on the same cadence whether or not the placeholder is
-	 * allowed to deliver: in raw mode the tick is what counts the frames
-	 * the old code would have injected. It costs one no-op work item at
-	 * no_signal_fps and only while the source is unlocked.
-	 */
+static void mz0380_no_signal_work_fn(struct work_struct *work)
+{
+	struct mz0380_dev *dev = container_of(to_delayed_work(work),
+					      struct mz0380_dev, no_signal_work);
+
+	mutex_lock(&dev->delivery_lock);
+	if (READ_ONCE(dev->streaming) && READ_ONCE(dev->no_signal_active) &&
+	    !(READ_ONCE(dev->deliver_raw) && mz0380_raw_source_live(dev)))
+		mz0380_no_signal_deliver(dev);
+	mutex_unlock(&dev->delivery_lock);
+
 	if (READ_ONCE(dev->streaming) && READ_ONCE(dev->no_signal_active))
 		mod_delayed_work(MZ0380_SYSTEM_WQ, &dev->no_signal_work,
 				 mz0380_no_signal_interval());
@@ -132,23 +190,14 @@ void mz0380_no_signal_activate(struct mz0380_dev *dev, const char *reason)
 
 	WRITE_ONCE(dev->no_signal_active, true);
 	WRITE_ONCE(dev->h264_waiting_for_idr, true);
-	if (!was_active) {
-		if (mz0380_no_signal_replay_allowed(dev))
-			dev_info(&dev->pci->dev,
-				 "NO SIGNAL presentation active (%s): host H.264 IDR replay at %u fps; no card command sent\n",
-				 reason,
-				 clamp_t(unsigned int, mz0380_no_signal_fps, 1, 10));
-		else
-			dev_info(&dev->pci->dev,
-				 "NO SIGNAL state entered (%s): node is delivering raw, so no placeholder is sent and the queue holds\n",
-				 reason);
-	}
+	if (was_active)
+		return;
+	dev_dbg(&dev->pci->dev, "NO SIGNAL picture armed (%s)\n", reason);
 	/*
-	 * Recovery may confirm the same unlocked state every retry interval. Do
-	 * not pull an already scheduled placeholder forward to zero each time;
-	 * that adds the receiver-poll cadence on top of no_signal_fps.
+	 * Recovery may confirm the same unlocked state every retry interval;
+	 * only the first activation schedules, so the cadence stays fixed.
 	 */
-	if (!was_active && READ_ONCE(dev->streaming))
+	if (READ_ONCE(dev->streaming))
 		mod_delayed_work(MZ0380_SYSTEM_WQ, &dev->no_signal_work, 0);
 }
 
@@ -158,8 +207,7 @@ void mz0380_no_signal_deactivate(struct mz0380_dev *dev)
 		return;
 	WRITE_ONCE(dev->no_signal_active, false);
 	cancel_delayed_work(&dev->no_signal_work);
-	dev_info(&dev->pci->dev,
-		 "NO SIGNAL presentation ended at clean live IDR\n");
+	dev_dbg(&dev->pci->dev, "NO SIGNAL picture ended at a live frame\n");
 }
 
 void mz0380_no_signal_stop(struct mz0380_dev *dev)

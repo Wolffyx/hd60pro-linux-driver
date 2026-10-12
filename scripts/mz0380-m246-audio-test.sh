@@ -50,7 +50,7 @@ if lsmod | grep -q '^mz0380'; then
 		echo "unload failed:"; cat /tmp/mz0380-m246-unload.log; exit 1; }
 fi
 dmesg -C
-EXTRA="enable_audio=1 ${EXTRA:-}" ./mz0380-live.sh load > /tmp/mz0380-m246-load.log 2>&1 || {
+TRACE=1 EXTRA="enable_audio=1 ${EXTRA:-}" ./mz0380-live.sh load > /tmp/mz0380-m246-load.log 2>&1 || {
 	echo "load failed:"; tail -20 /tmp/mz0380-m246-load.log; exit 1; }
 sleep 3
 NODE=$(node) || { echo "no video node"; exit 1; }
@@ -84,7 +84,7 @@ timeout $((SECS + 10)) arecord -D hw:CARD=mz0380,DEV=0 -f S16_LE -c 2 -r 48000 \
 wait "$VPID"
 
 echo "=== what was sent ==="
-dmesg | grep -E "SET_AIC|audio window registered" | sed 's/^/  /'
+dmesg | grep -E "mbx op=0x(2a|03) " | sed 's/^/  /'
 
 echo "=== driver counters ==="
 grep -E "^  audio      :|^  audio alsa :|^  audio pcm  :|^  pixelformat|^  raw frames" /proc/mz0380-state | sed 's/^/ /'

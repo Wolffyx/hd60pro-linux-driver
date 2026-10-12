@@ -7,34 +7,23 @@
 #
 
 mz0380-objs := \
-	src/mz0380-cards.o \
 	src/mz0380-pci.o \
-	src/mz0380-params-base.o \
-	src/mz0380-params-signal.o \
-	src/mz0380-params-windows.o \
-	src/mz0380-core.o \
-	src/mz0380-snapshot.o \
-	src/mz0380-proc-diagnostics.o \
-	src/mz0380-proc-debug.o \
-	src/mz0380-proc.o \
-	src/mz0380-controls-read.o \
-	src/mz0380-controls-write.o \
+	src/mz0380-params.o \
+	src/mz0380-cards.o \
+	src/mz0380-fw.o \
 	src/mz0380-mailbox.o \
+	src/mz0380-proc.o \
 	src/mz0380-video.o \
-	src/mz0380-video-state.o \
 	src/mz0380-vb2.o \
-	src/mz0380-no-signal.o \
 	src/mz0380-signal.o \
+	src/mz0380-no-signal.o \
 	src/mz0380-mst3367.o \
-	src/mz0380-mst3367-debug.o \
 	src/mz0380-mst3367-signal.o \
-	src/mz0380-mst3367-bitbang.o \
+	src/mz0380-mst3367-debug.o \
 	src/mz0380-dma.o \
-	src/mz0380-dma-extent.o \
 	src/mz0380-dma-stream.o \
 	src/mz0380-dma-drain.o \
-	src/mz0380-dma-nosg.o \
-	src/mz0380-fw.o \
+	src/mz0380-dma-raw.o \
 	src/mz0380-audio.o
 
 
@@ -73,11 +62,9 @@ endif
 endif
 
 .PHONY: all all-kernels kernels kcheck clean objclean distclean fw-install \
-        load load-streaming unload tarball list probe \
-        capture capture-h264 capture-audio \
-        install uninstall dkms-install dkms-uninstall
+        load unload tarball list install uninstall dkms-install dkms-uninstall
 
-TARFILES = Makefile *.md *.sh src scripts
+TARFILES = Makefile dkms.conf mz0380.modprobe.conf COPYING *.md *.sh src scripts
 
 #
 # Which kernel to build against.
@@ -100,12 +87,18 @@ KVERS_BUILDABLE = $(shell for d in /lib/modules/*/; do \
 	done | sort -rV)
 
 #
-# Toolchain auto-detect.
-# CachyOS / Arch / Fedora ship a clang-built kernel; gcc cannot compile
-# modules against it (rejects -mretpoline-external-thunk etc).
-# If clang + ld.lld are present, use them; override on CLI to force.
+# Toolchain: build with the compiler that built the TARGET kernel.
 #
-ifeq ($(shell command -v clang >/dev/null && command -v ld.lld >/dev/null && echo yes),yes)
+# A module has to be compiled by the same compiler family as its kernel - gcc
+# rejects a clang kernel's flags (-mretpoline-external-thunk and friends), and
+# clang fails on a gcc kernel's. Picking clang whenever it was installed broke
+# the gcc-built LTS kernel on a machine whose default kernel is clang-built, so
+# ask the kernel instead: its auto.conf records CONFIG_CC_IS_CLANG. Pass
+# KBUILD_FLAGS on the command line to override.
+#
+KCONFIG_AUTO = $(KBUILD)/include/config/auto.conf
+KCC_CLANG   := $(shell grep -qsx 'CONFIG_CC_IS_CLANG=y' $(KCONFIG_AUTO) && echo y)
+ifeq ($(KCC_CLANG),y)
 KBUILD_FLAGS ?= CC=clang LD=ld.lld
 else
 KBUILD_FLAGS ?=
@@ -143,6 +136,11 @@ kcheck:
 		echo; \
 		echo "  buildable kernels: $(KVERS_BUILDABLE)"; \
 		echo "  cross-build with:  make KVER=<version>"; \
+		exit 1; \
+	fi
+	@if [ "$(KCC_CLANG)" = y ] && ! { command -v clang && command -v ld.lld; } >/dev/null; then \
+		echo "ERROR: kernel '$(KVER)' was built with clang, so this module must be"; \
+		echo "       too - install clang and lld (Arch: pacman -S clang lld)."; \
 		exit 1; \
 	fi
 
@@ -219,100 +217,66 @@ distclean: clean
 
 
 #
-# Firmware install. The MZ0380.HD.HEX blob ships with the Windows
-# driver and is not redistributable here. Copy it from the extracted
-# installer (or from a Windows install) into /lib/firmware/mz0380/.
+# The card boots its own flash image; the driver never uploads firmware. The
+# only file it ever asks for is MZ0380.FW.TXT, a 6-byte version sidecar read to
+# compare versions - optional, and the comparison is skipped without it.
 #
 FW_DIR ?= /lib/firmware/mz0380
-# M170: this checked for MZ0380.HD.HEX - the blob the driver STOPPED USING when
-# the upload path was deleted from the tree. load-streaming depends on it, so
-# `make load-streaming` failed outright on a correctly-installed system, telling
-# the user to go and extract a firmware image that nothing reads.
-#
-# The card boots its own flash. The only file the driver ever requests is the
-# MZ0380.FW.TXT sidecar, and only to compare a version string and warn on a
-# mismatch. It is optional: without it the driver says so and carries on.
 fw-install:
 	@if [ ! -f $(FW_DIR)/MZ0380.FW.TXT ]; then \
-		echo "note: $(FW_DIR)/MZ0380.FW.TXT is absent."; \
-		echo "      The driver does not need it to run - the card boots its"; \
-		echo "      own flash image. It is a version sidecar: without it the"; \
-		echo "      expected-vs-actual firmware check is simply skipped."; \
-		echo "      Create it with the card's version if you want the check:"; \
+		echo "note: $(FW_DIR)/MZ0380.FW.TXT is absent - not needed to run."; \
+		echo "      To enable the firmware version check:"; \
 		echo "          echo 01.11 | sudo tee $(FW_DIR)/MZ0380.FW.TXT"; \
 	else \
 		echo "firmware version sidecar: $(FW_DIR)/MZ0380.FW.TXT = $$(cat $(FW_DIR)/MZ0380.FW.TXT)"; \
 	fi
 
 #
-# Load helpers.
+# Development load/unload straight from the tree. For anything more,
+# ./mz0380-live.sh does the same with a smoke test and a spawn tally.
 #
 load: all
-	sudo dmesg -c >/dev/null
 	sudo modprobe -a videodev videobuf2-v4l2 videobuf2-vmalloc \
 		v4l2-dv-timings snd-pcm
-	sudo insmod ./mz0380.ko procfs_verbosity=2
-
-# M166/M167: the shipping defaults ARE the capture configuration, so this no
-# longer has to spell them out. Kept because the name is in the README and in
-# muscle memory; it is now a plain load with the dependencies pulled in.
-load-streaming: all fw-install
-	sudo modprobe -a videodev videobuf2-v4l2 videobuf2-vmalloc \
-		v4l2-dv-timings snd-pcm
-	sudo insmod ./mz0380.ko procfs_verbosity=2
+	sudo insmod ./mz0380.ko
 
 unload:
 	sudo rmmod mz0380 || true
-	sync
 
 tarball:
-	tar zcf ../mz0380-dev-$(shell date +%Y%m%d-%H%M%S).tgz $(TARFILES)
+	tar zcf ../mz0380-$(VERSION)-$(shell date +%Y%m%d).tgz $(TARFILES)
 
-#
-# Smoke tests (require an actual capture + HDMI source).
-#
 list:
 	v4l2-ctl --list-devices
-
-probe:
-	@echo "Use: sudo scripts/mz0380-m55-real-capture.sh 6 45"
-
-# M130: the payload is planar I420, not an H.264 bitstream. The old name said
-# h264 and the old argument asked for 6 frames from a card that delivers one.
-capture: all
-	sudo scripts/mz0380-m55-real-capture.sh 1 45
-
-capture-h264: capture
-
-capture-audio:
-	@echo "ALSA PCM DMA is not implemented; enable_audio must remain disabled."
-	@false
 
 #
 # Installation.
 #
-# `make install` is the quick path: drop the module where depmod can find it,
-# install the modprobe.d file, and rebuild the dependency tables. It is tied to
-# ONE kernel - the next kernel upgrade leaves it behind. For anything other
-# than a quick test, use `make dkms-install`, which rebuilds automatically.
+# `make dkms-install` is the one to use: the module is rebuilt automatically on
+# every kernel upgrade. `make install` drops the current build into one
+# kernel's module tree, and the next kernel upgrade leaves it behind.
 #
-VERSION      = 0.1.0
+# Neither builds: run `make` as your user first, so nothing in the tree ends up
+# owned by root.
+#
+VERSION      = 0.2.0
 MODDIR       = /lib/modules/$(KVER)/kernel/drivers/media/pci/mz0380
 MODPROBE_DIR = /etc/modprobe.d
 DKMS_SRC     = /usr/src/mz0380-$(VERSION)
 
-install: all
+install:
+	@[ -f mz0380.ko ] || { echo "build first, as your user: make"; exit 1; }
+	@[ "$$(modinfo -F vermagic mz0380.ko | cut -d' ' -f1)" = "$(KVER)" ] || \
+		{ echo "mz0380.ko was built for another kernel; run: make KVER=$(KVER)"; exit 1; }
 	install -d $(DESTDIR)$(MODDIR)
 	install -m 644 mz0380.ko $(DESTDIR)$(MODDIR)/
 	install -d $(DESTDIR)$(MODPROBE_DIR)
 	install -m 644 mz0380.modprobe.conf $(DESTDIR)$(MODPROBE_DIR)/mz0380.conf
 	@[ -n "$(DESTDIR)" ] || depmod -a $(KVER)
 	@echo
-	@echo "installed for kernel $(KVER)."
-	@echo "The card autoloads on its PCI ID - MODULE_DEVICE_TABLE is set - so a"
-	@echo "reboot is enough. To load it now:  sudo modprobe mz0380"
-	@echo
-	@echo "This binds to ONE kernel. Use 'make dkms-install' to survive upgrades."
+	@echo "installed for kernel $(KVER). It loads by itself when the card is"
+	@echo "present (after a reboot), or now with:  sudo modprobe mz0380"
+	@echo "This binds to ONE kernel; 'make dkms-install' survives upgrades."
 
 uninstall:
 	rm -f $(DESTDIR)$(MODDIR)/mz0380.ko
@@ -322,23 +286,25 @@ uninstall:
 	@echo "uninstalled from kernel $(KVER)."
 
 #
-# DKMS. Copies the tree to /usr/src so the module is rebuilt on kernel upgrade.
-# The source list is explicit rather than a bare `cp -r .`: the working tree
-# carries multi-megabyte RE material (re-dump/, windowsDriver/, reference/) that
-# has no business in /usr/src.
+# DKMS. Copies the sources - and only the sources - to /usr/src, so the module
+# is rebuilt on every kernel upgrade. Re-running it replaces an earlier install
+# of the same version.
 #
 dkms-install: dkms.conf
 	@command -v dkms >/dev/null || { echo "dkms is not installed"; exit 1; }
-	install -d $(DKMS_SRC)
-	cp -r Makefile dkms.conf mz0380.modprobe.conf src $(DKMS_SRC)/
+	-dkms remove -m mz0380 -v $(VERSION) --all >/dev/null 2>&1
+	rm -rf $(DKMS_SRC)
+	install -d $(DKMS_SRC)/src
+	install -m 644 Makefile dkms.conf mz0380.modprobe.conf COPYING $(DKMS_SRC)/
+	install -m 644 src/*.c src/*.h $(DKMS_SRC)/src/
 	dkms add     -m mz0380 -v $(VERSION)
 	dkms build   -m mz0380 -v $(VERSION)
 	dkms install -m mz0380 -v $(VERSION)
 	install -d $(MODPROBE_DIR)
 	install -m 644 mz0380.modprobe.conf $(MODPROBE_DIR)/mz0380.conf
 	@echo
-	@echo "DKMS install complete. The module now rebuilds on kernel upgrades."
-	@echo "Load it with:  sudo modprobe mz0380"
+	@echo "DKMS install complete; the module rebuilds on kernel upgrades."
+	@echo "Load it now with:  sudo modprobe mz0380"
 
 dkms-uninstall:
 	-dkms remove -m mz0380 -v $(VERSION) --all

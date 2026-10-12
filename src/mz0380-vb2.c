@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * MZ0380 videobuf2 queue ownership and stream lifecycle.
+ *
+ * With persistent_h264 (the default) the card-side encoder pipeline outlives
+ * the VB2 queue: the first STREAMON starts it (one encoder spawn), STREAMOFF
+ * only detaches, and a later STREAMON attaches to the pipeline that is still
+ * running. A source that changed, or a format the running pipeline was not
+ * started for, replaces it once - at the next STREAMON, never behind the
+ * application's back.
  */
 
-#include "mz0380-internal.h"
-
-/* ===== vb2 queue ops ================================================= */
+#include "mz0380.h"
 
 static int mz0380_queue_setup(struct vb2_queue *vq,
 			      unsigned int *nbuffers, unsigned int *nplanes,
@@ -14,16 +19,12 @@ static int mz0380_queue_setup(struct vb2_queue *vq,
 	struct mz0380_dev *dev = vb2_get_drv_priv(vq);
 	unsigned int size = mz0380_current_sizeimage(dev);
 
-	if (*nplanes) {
-		if (sizes[0] < size)
-			return -EINVAL;
-		return 0;
-	}
+	if (*nplanes)
+		return sizes[0] < size ? -EINVAL : 0;
 
 	*nplanes = 1;
 	sizes[0] = size;
-	if (*nbuffers < 3)
-		*nbuffers = 3;
+	*nbuffers = max(*nbuffers, 3u);
 	return 0;
 }
 
@@ -33,8 +34,7 @@ static int mz0380_buf_prepare(struct vb2_buffer *vb)
 	unsigned int size = mz0380_current_sizeimage(dev);
 
 	if (vb2_plane_size(vb, 0) < size) {
-		dev_err(&dev->pci->dev,
-			"buffer too small (%lu < %u)\n",
+		dev_err(&dev->pci->dev, "buffer too small (%lu < %u)\n",
 			vb2_plane_size(vb, 0), size);
 		return -EINVAL;
 	}
@@ -55,34 +55,183 @@ static void mz0380_buf_queue(struct vb2_buffer *vb)
 	spin_unlock_irqrestore(&dev->buf_lock, flags);
 }
 
+static void mz0380_return_buffers(struct mz0380_dev *dev,
+				  enum vb2_buffer_state state)
+{
+	struct mz0380_vb_buffer *buf, *tmp;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->buf_lock, flags);
+	list_for_each_entry_safe(buf, tmp, &dev->buf_list, list) {
+		list_del(&buf->list);
+		vb2_buffer_done(&buf->vb.vb2_buf, state);
+	}
+	spin_unlock_irqrestore(&dev->buf_lock, flags);
+}
+
+/*
+ * STREAMON with no HDMI source: serve the NO SIGNAL picture and spend no
+ * encoder spawn. The receiver monitor starts the pipeline once a stable source
+ * appears.
+ */
 static int mz0380_start_placeholder_only(struct mz0380_dev *dev, int lock_ret)
 {
-	if (!mz0380_stream_without_signal || !mz0380_h264_probe ||
-	    !mz0380_persistent_h264)
+	if (!mz0380_stream_without_signal || !mz0380_persistent_h264)
 		return lock_ret ?: -ENOLCK;
-	if (dev->capture.width != 1920 || dev->capture.height != 1080) {
+	/* The H.264 placeholder is one fixed 1080p access unit. */
+	if (!dev->deliver_raw &&
+	    (dev->capture.width != 1920 || dev->capture.height != 1080)) {
 		dev_err(&dev->pci->dev,
-			"NO SIGNAL placeholder is 1920x1080 but VB2 negotiated %ux%u; cannot return mislabeled H.264\n",
+			"no HDMI signal, and the H.264 NO SIGNAL picture is 1920x1080 while the capture is set up for %ux%u\n",
 			dev->capture.width, dev->capture.height);
 		return -EPIPE;
 	}
 
-	dev->detected_timings = mz0380_no_signal;
-	dev->signal_locked = false;
-	dev->capture.source_width = 0;
-	dev->capture.source_height = 0;
-	dev->capture.source_fps = 0;
-	dev->capture.source_interlaced = false;
+	mz0380_signal_clear(dev);
 	dev->video_sequence = 0;
 	WRITE_ONCE(dev->pipeline_reconfigure_pending, false);
 	WRITE_ONCE(dev->pipeline_start_failed, false);
+	WRITE_ONCE(dev->raw_last_live, 0);
 	WRITE_ONCE(dev->streaming, true);
-	mz0380_no_signal_activate(dev,
-		"STREAMON arrived before any stable HDMI lock");
+	mz0380_no_signal_activate(dev, "capture started without a source");
 	mz0380_signal_recovery_start(dev);
 	dev_info(&dev->pci->dev,
-		 "VB2 attached in placeholder-only state: encoder not spawned, SET_VIC count remains %u\n",
-		 dev->encoder_spawns);
+		 "capture started with no HDMI signal; showing NO SIGNAL until a source appears\n");
+	return 0;
+}
+
+/*
+ * Attach VB2 to the persistent pipeline that is already producing. Sending
+ * even SET_ENC/SET_BUF/START here would be wrong - tinyvenc is no longer in
+ * its initial command state - and SET_VIC would fork another encoder.
+ */
+static int mz0380_attach_pipeline(struct mz0380_dev *dev)
+{
+	if (dev->capture.width != dev->pipeline_width ||
+	    dev->capture.height != dev->pipeline_height) {
+		dev_err(&dev->pci->dev,
+			"cannot attach a %ux%u capture to the running %ux%u encoder\n",
+			dev->capture.width, dev->capture.height,
+			dev->pipeline_width, dev->pipeline_height);
+		return -EBUSY;
+	}
+
+	dev->video_sequence = 0;
+	WRITE_ONCE(dev->h264_waiting_for_idr, true);
+	WRITE_ONCE(dev->last_h264_frame_stamp, jiffies);
+	/*
+	 * Raw frames keep flowing through a reattachment: give them
+	 * MZ0380_RAW_LIVE_MS to arrive before a raw NO SIGNAL picture may be
+	 * shown, or every reopen would flash one.
+	 */
+	WRITE_ONCE(dev->raw_last_live, jiffies);
+	WRITE_ONCE(dev->streaming, true);
+	dev->pipeline_attach_count++;
+	/*
+	 * The source may have changed while nothing was attached and the
+	 * monitor was stopped: hold the placeholder until one fresh receiver
+	 * measurement proves this pipeline still matches.
+	 */
+	WRITE_ONCE(dev->signal_recovering, true);
+	mz0380_no_signal_activate(dev, "validating HDMI at reattachment");
+	dev_dbg(&dev->pci->dev,
+		"attached to the running encoder (attachment %u, spawns %u)\n",
+		dev->pipeline_attach_count, dev->encoder_spawns);
+	mz0380_signal_recovery_start(dev);
+	return 0;
+}
+
+/*
+ * M65: no live lock, but this source's mode was detected moments ago. A
+ * source that transmits in bursts can miss the instant STREAMON runs, and
+ * SET_VIC only needs the geometry. Only for "no lock" and "not stable yet": a
+ * different mode (-ERANGE) or a mailbox error is not a lock to reuse.
+ */
+static bool mz0380_use_recent_lock(struct mz0380_dev *dev, int ret)
+{
+	struct v4l2_dv_timings *t = &dev->last_good_timings;
+
+	if ((ret != -ENOLCK && ret != -EAGAIN) || !dev->have_last_good ||
+	    !time_before(jiffies, dev->last_good_stamp +
+			 msecs_to_jiffies(MZ0380_SIGNAL_CACHE_MS)))
+		return false;
+
+	dev->signal_locked = true;
+	dev->detected_timings = *t;
+	dev->capture.source_width = t->bt.width;
+	dev->capture.source_height = t->bt.height;
+	dev->capture.source_fps = mz0380_source_fps(t);
+	dev->capture.source_interlaced = t->bt.interlaced;
+	dev_info(&dev->pci->dev,
+		 "no live HDMI lock (%d); starting with the %ux%u%c detected %ums ago\n",
+		 ret, t->bt.width, t->bt.height, t->bt.interlaced ? 'i' : 'p',
+		 jiffies_to_msecs(jiffies - dev->last_good_stamp));
+	return true;
+}
+
+/*
+ * M174/M222: there is no scaler, so the buffers and the card must agree on the
+ * frame size. Refuse and tell the application through SOURCE_CHANGE instead of
+ * delivering a frame mislabelled as a different geometry.
+ */
+static int mz0380_check_geometry(struct mz0380_dev *dev)
+{
+	u32 sw = dev->capture.source_width, sh = dev->capture.source_height;
+
+	if (!dev->signal_locked || !sw || !sh ||
+	    (sw == dev->capture.width && sh == dev->capture.height))
+		return 0;
+
+	dev_err(&dev->pci->dev,
+		"the HDMI source is %ux%u but the capture was set up for %ux%u; set the format to %ux%u (or follow the SOURCE_CHANGE event) and start again\n",
+		sw, sh, dev->capture.width, dev->capture.height, sw, sh);
+	mz0380_signal_event(dev);
+	return -EPIPE;
+}
+
+/* No pipeline yet: measure the source and start one (one encoder spawn). */
+static int mz0380_start_fresh(struct mz0380_dev *dev)
+{
+	struct v4l2_dv_timings live;
+	bool locked;
+	int ret;
+
+	/*
+	 * One lock-byte read is enough to prove the empty-input case; the
+	 * monitor performs the full measurement once lock appears.
+	 */
+	if (mz0380_stream_without_signal && mz0380_persistent_h264) {
+		ret = mz0380_mst3367_read_lock(dev, &locked, false);
+		if (!ret && !locked)
+			return mz0380_start_placeholder_only(dev, -ENOLCK);
+	}
+
+	ret = mz0380_query_signal(dev, &live);
+	if (ret && !mz0380_use_recent_lock(dev, ret)) {
+		if (mz0380_stream_without_signal)
+			return mz0380_start_placeholder_only(dev, ret);
+		dev_warn(&dev->pci->dev,
+			 "no HDMI signal locked (%d) - check the source\n",
+			 ret);
+		return ret;
+	}
+
+	ret = mz0380_check_geometry(dev);
+	if (ret)
+		return ret;
+
+	dev->video_sequence = 0;
+	WRITE_ONCE(dev->h264_waiting_for_idr, true);
+	WRITE_ONCE(dev->last_h264_frame_stamp, jiffies);
+	WRITE_ONCE(dev->raw_last_live, jiffies);
+	WRITE_ONCE(dev->streaming, true);
+	ret = mz0380_dma_start(dev);
+	if (ret) {
+		WRITE_ONCE(dev->streaming, false);
+		dev_err(&dev->pci->dev, "encoder start failed (%d)\n", ret);
+		return ret;
+	}
+	mz0380_signal_recovery_start(dev);
 	return 0;
 }
 
@@ -93,289 +242,68 @@ static int mz0380_start_streaming(struct vb2_queue *vq, unsigned int count)
 
 	if (!dev->dma_armed) {
 		dev_warn(&dev->pci->dev,
-			 "start_streaming called but DMA is not armed (enable_dma=1?)\n");
+			 "cannot stream: DMA setup failed at load (see the earlier messages)\n");
 		ret = -ENODEV;
 		goto error;
 	}
-
 	/*
-	 * M245: every path below talks to the card through the mailbox. After a
-	 * resume the handshake runs asynchronously, and a card whose handshake
-	 * failed at probe is deaf; either way, say so here instead of letting a
-	 * command time out halfway through a pipeline start.
+	 * M245: every path below talks to the card. After a resume the
+	 * handshake runs asynchronously, and a card whose handshake failed at
+	 * probe is deaf; say so instead of timing out mid-start.
 	 */
 	if (dev->fw_state != MZ0380_FW_STATE_READY) {
 		dev_warn(&dev->pci->dev,
-			 "start_streaming: card handshake not complete (state %s)\n",
+			 "cannot stream: card handshake %s\n",
 			 mz0380_fw_state_name(dev->fw_state));
-		ret = -EAGAIN;
+		ret = -EIO;
 		goto error;
 	}
 
 	/* M245: see mz0380_s_ctrl - held for exactly the streaming session. */
 	mz0380_encoder_ctrls_grab(dev, true);
 
-	/*
-	 * A persistent H.264 pipeline is already producing into the module-owned
-	 * window-1 ring.  Reopening OBS attaches only the VB2 queue: sending even
-	 * SET_ENC/SET_BUF/START here is wrong because tinyvenc is no longer in its
-	 * initial command state, and sending SET_VIC would fork another process.
-	 */
-	if (!mz0380_stream_nosg && mz0380_h264_probe &&
-	    mz0380_persistent_h264 && READ_ONCE(dev->pipeline_running) &&
-	    READ_ONCE(dev->pipeline_reconfigure_pending)) {
+	if (mz0380_persistent_h264 && READ_ONCE(dev->pipeline_running) &&
+	    (READ_ONCE(dev->pipeline_reconfigure_pending) ||
+	     mz0380_pipeline_config_stale(dev))) {
 		dev_info(&dev->pci->dev,
-			 "stable HDMI timing changed; cleanly replacing the persistent encoder at this userspace attachment\n");
+			 "source or format changed; restarting the encoder for this capture (one encoder spawn)\n");
 		mz0380_dma_stop(dev);
 	}
 
-	if (!mz0380_stream_nosg && mz0380_h264_probe &&
-	    mz0380_persistent_h264 && READ_ONCE(dev->pipeline_running)) {
-		if (dev->capture.width != dev->pipeline_width ||
-		    dev->capture.height != dev->pipeline_height) {
-			dev_err(&dev->pci->dev,
-				"cannot attach %ux%u VB2 session to persistent %ux%u encoder pipeline; stop/reconfigure is required\n",
-				dev->capture.width, dev->capture.height,
-				dev->pipeline_width, dev->pipeline_height);
-			ret = -EBUSY;
-			goto error;
-		}
-
-		dev->video_sequence = 0;
-		WRITE_ONCE(dev->h264_waiting_for_idr, true);
-		WRITE_ONCE(dev->last_h264_frame_stamp, jiffies);
-		WRITE_ONCE(dev->streaming, true);
-		dev->pipeline_attach_count++;
-		/*
-		 * The HDMI source may have changed while VB2 was detached and the
-		 * receiver monitor was intentionally stopped. Present the host IDR
-		 * until one fresh lock measurement proves that this pipeline still
-		 * matches, then switch only at a clean live IDR.
-		 */
-		WRITE_ONCE(dev->signal_recovering, true);
-		mz0380_no_signal_activate(dev,
-			"validating HDMI state at persistent reattachment");
-		dev_info(&dev->pci->dev,
-			 "VB2 attached to persistent H.264 pipeline (attachment %u, SET_VIC spawns remain %u); no card command sent, validating HDMI then waiting for SPS/PPS + IDR\n",
-			 dev->pipeline_attach_count, dev->encoder_spawns);
-		mz0380_signal_recovery_start(dev);
-		return 0;
-	}
-
-	/*
-	 * Real capture is driven by whatever the receiver is actually locked
-	 * to, so re-detect here: SET_VIC carries the geometry AND the frame
-	 * rate down to the card, and a stale timing would arm the encoder for
-	 * the wrong cadence. The fake-frame generator ignores the input, so a
-	 * lock failure is only fatal for the real path.
-	 */
-	if (!mz0380_stream_nosg) {
-		struct v4l2_dv_timings live;
-		bool receiver_locked;
-
-		/*
-		 * Do not spend up to signal_poll_ms proving the obvious empty-input
-		 * case. One lock-byte read is enough to start the host placeholder;
-		 * the independent monitor performs the full coherent measurement when
-		 * lock later appears, before it spends the first SET_VIC.
-		 */
-		if (mz0380_stream_without_signal && mz0380_h264_probe &&
-		    mz0380_persistent_h264) {
-			ret = mz0380_mst3367_read_lock(dev, &receiver_locked, false);
-			if (!ret && !receiver_locked) {
-				ret = mz0380_start_placeholder_only(dev, -ENOLCK);
-				if (!ret)
-					return 0;
-				goto error;
-			}
-		}
-
-		ret = mz0380_query_signal(dev, &live);
-		if (ret && dev->have_last_good && mz0380_signal_cache_ms &&
-		    time_before(jiffies, dev->last_good_stamp +
-				msecs_to_jiffies(mz0380_signal_cache_ms))) {
-			/*
-			 * M65: no live lock, but we detected this source's mode
-			 * moments ago. A source that transmits in ~300ms bursts
-			 * around a power-cycle can never be locked at the
-			 * instant STREAMON runs, and SET_VIC only needs the
-			 * geometry - which has not changed. Arm with what we
-			 * measured; the frames are black until the source
-			 * transmits again, which is an EDID problem, not a
-			 * reason to refuse to stream.
-			 */
-			live = dev->last_good_timings;
-			dev->detected_timings = live;
-			dev->signal_locked = true;
-			dev->capture.source_width = live.bt.width;
-			dev->capture.source_height = live.bt.height;
-			dev->capture.source_fps = mz0380_source_fps(&live);
-			dev->capture.source_interlaced = live.bt.interlaced;
-			if (dev->capture.source_fps) {
-				dev->capture.timeperframe.numerator = 1;
-				dev->capture.timeperframe.denominator =
-					dev->capture.source_fps;
-			}
-			dev_info(&dev->pci->dev,
-				 "no live lock (%d) - arming with the detection from %ums ago (%ux%u%c) [signal_cache_ms=%u]\n",
-				 ret,
-				 jiffies_to_msecs(jiffies - dev->last_good_stamp),
-				 live.bt.width, live.bt.height,
-				 live.bt.interlaced ? 'i' : 'p',
-				 mz0380_signal_cache_ms);
-			ret = 0;
-		} else if (ret && mz0380_stream_without_signal) {
-			ret = mz0380_start_placeholder_only(dev, ret);
-			if (!ret)
-				return 0;
-			goto error;
-		} else if (ret) {
-			dev_warn(&dev->pci->dev,
-				 "no HDMI signal locked (%d) - check the source, HPD and EDID load\n",
-				 ret);
-			goto error;
-		}
-
-		dev_info(&dev->pci->dev,
-			 "live input %ux%u%c@%u -> encoder output %ux%u@%u\n",
-			 dev->capture.source_width, dev->capture.source_height,
-			 dev->capture.source_interlaced ? 'i' : 'p',
-			 dev->capture.source_fps, dev->capture.width,
-			 dev->capture.height,
-			 dev->capture.timeperframe.denominator /
-			 max_t(u32, dev->capture.timeperframe.numerator, 1));
-
-		/*
-		 * M174: the buffers and the card must agree on the frame size.
-		 *
-		 * Two geometries have always existed side by side and nothing
-		 * checked they matched. mz0380_queue_setup() sizes the vb2
-		 * plane from capture.width/height - what the application
-		 * negotiated, 1920x1080 unless it said otherwise - while the
-		 * drain measures and delivers
-		 * source_width * source_height * 3/2, what the card actually
-		 * wrote. On the only source this project has ever tested those
-		 * are the same number, so the gap has never shown.
-		 *
-		 * With a 720p source they differ: the card writes 1382400
-		 * bytes, the drain delivers them, and the application is
-		 * holding a buffer it was told is 1920x1080 with 1382400 bytes
-		 * of payload in it. Nothing errors. It just renders garbage,
-		 * which is the worst available outcome and precisely the class
-		 * of defect M168 was about.
-		 *
-		 * Refusing is the honest answer, and it is also the useful one:
-		 * the source-change event queued below tells a well-behaved
-		 * client to re-negotiate, S_FMT to the detected geometry then
-		 * resizes the buffers, and the capture works. Delivering the
-		 * mislabelled frame would leave the client no way to find out.
-		 *
-		 * NOTE: the non-1080p path is CORRECT BY CONSTRUCTION here, not
-		 * verified - this project has never had a non-1080p source. All
-		 * that is proven is that the old behaviour was wrong.
-		 */
-		if (mz0380_strict_geometry && dev->signal_locked &&
-		    dev->capture.source_width &&
-		    dev->capture.source_height &&
-		    (dev->capture.source_width != dev->capture.width ||
-		     dev->capture.source_height != dev->capture.height)) {
-			dev_err(&dev->pci->dev,
-				"refusing to stream: the source is %ux%u but the buffers were allocated for %ux%u, and this path has no scaler - the card would write %u bytes into a buffer described as %u. S_FMT to %ux%u (or VIDIOC_SUBSCRIBE_EVENT the source change) and try again\n",
-				dev->capture.source_width,
-				dev->capture.source_height,
-				dev->capture.width, dev->capture.height,
-				dev->capture.source_width *
-				dev->capture.source_height * 3 / 2,
-				dev->capture.width * dev->capture.height * 3 / 2,
-				dev->capture.source_width,
-				dev->capture.source_height);
-			if (dev->video_registered)
-				mz0380_signal_event(dev);
-			ret = -EPIPE;
-			goto error;
-		}
-	}
-
-	/*
-	 * Fake-frame path: no completion IRQ exists (M41), so streaming is a
-	 * polling kthread that spawns the encoder itself, once per frame
-	 * (M39). The real path arms the encoder here and delivers from the
-	 * MSI-driven drain.
-	 */
-	/* Completion work may run as soon as START is posted. */
-	if (!mz0380_stream_nosg && mz0380_h264_probe) {
-		WRITE_ONCE(dev->h264_waiting_for_idr, true);
-		WRITE_ONCE(dev->last_h264_frame_stamp, jiffies);
-	}
-	dev->streaming = true;
-	if (mz0380_stream_nosg)
-		ret = mz0380_nosg_capture_start(dev);
+	if (mz0380_persistent_h264 && READ_ONCE(dev->pipeline_running))
+		ret = mz0380_attach_pipeline(dev);
 	else
-		ret = mz0380_dma_start(dev);
-	if (ret) {
-		dev->streaming = false;
-		dev_err(&dev->pci->dev,
-			"%s failed (%d)\n",
-			mz0380_stream_nosg ? "nosg_capture_start" : "dma_start",
-			ret);
-		goto error;
-	}
-	mz0380_signal_recovery_start(dev);
+		ret = mz0380_start_fresh(dev);
+	if (!ret)
+		return 0;
 
-	return 0;
-
-error:
 	mz0380_encoder_ctrls_grab(dev, false);
-	{
-		struct mz0380_vb_buffer *buf, *tmp;
-		unsigned long flags;
-		spin_lock_irqsave(&dev->buf_lock, flags);
-		list_for_each_entry_safe(buf, tmp, &dev->buf_list, list) {
-			list_del(&buf->list);
-			vb2_buffer_done(&buf->vb.vb2_buf,
-					VB2_BUF_STATE_QUEUED);
-		}
-		spin_unlock_irqrestore(&dev->buf_lock, flags);
-	}
+error:
+	mz0380_return_buffers(dev, VB2_BUF_STATE_QUEUED);
 	return ret;
 }
 
 static void mz0380_stop_streaming(struct vb2_queue *vq)
 {
 	struct mz0380_dev *dev = vb2_get_drv_priv(vq);
-	struct mz0380_vb_buffer *buf, *tmp;
-	unsigned long flags;
 
-	/*
-	 * nosg: the capture thread owns the start/stop cycle; its last
-	 * iteration already sent STOP, so only the thread needs joining. The
-	 * verbose dma_stop still runs for its end-of-stream diagnostics dump.
-	 */
-	dev->streaming = false;
+	WRITE_ONCE(dev->streaming, false);
 	mz0380_encoder_ctrls_grab(dev, false);
 	mz0380_signal_recovery_stop(dev);
-	mz0380_nosg_capture_stop(dev);
-	if (!mz0380_stream_nosg && mz0380_h264_probe &&
-	    mz0380_persistent_h264 && READ_ONCE(dev->pipeline_running)) {
+	if (mz0380_persistent_h264 && READ_ONCE(dev->pipeline_running)) {
 		/*
-		 * Publish detachment before synchronizing with a drain already in
-		 * progress.  Future drains continue consuming card slots and ACKing
-		 * enc_stat, but cannot take a VB2 buffer.
+		 * Publish detachment before synchronising with a drain already
+		 * in progress. Later drains keep consuming card slots and
+		 * ACKing enc_stat, but cannot take a VB2 buffer.
 		 */
 		smp_mb();
 		flush_work(&dev->drain_work);
-		dev_info(&dev->pci->dev,
-			 "VB2 detached; persistent H.264 pipeline, DMA mappings and completion ACK path remain active (no STOP, no SET_VIC budget spent)\n");
+		dev_dbg(&dev->pci->dev,
+			"detached; the encoder keeps running for the next capture\n");
 	} else {
 		mz0380_dma_stop(dev);
 	}
-
-	spin_lock_irqsave(&dev->buf_lock, flags);
-	list_for_each_entry_safe(buf, tmp, &dev->buf_list, list) {
-		list_del(&buf->list);
-		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-	}
-	spin_unlock_irqrestore(&dev->buf_lock, flags);
+	mz0380_return_buffers(dev, VB2_BUF_STATE_ERROR);
 }
 
 const struct vb2_ops mz0380_qops = {
@@ -387,10 +315,8 @@ const struct vb2_ops mz0380_qops = {
 #ifdef MZ0380_HAVE_VB2_WAIT_OPS
 	/*
 	 * Kernels up to 6.x require the driver to drop q->lock around a
-	 * blocking DQBUF itself. The ops and the vb2_ops_wait_* helpers were
-	 * removed once vb2 core took that over, so newer kernels must not set
-	 * them. The Makefile probes videobuf2-v4l2.h rather than testing
-	 * LINUX_VERSION_CODE - the removal release is not worth guessing.
+	 * blocking DQBUF itself; newer vb2 core does it and removed the ops.
+	 * The Makefile probes videobuf2-v4l2.h for them.
 	 */
 	.wait_prepare    = vb2_ops_wait_prepare,
 	.wait_finish     = vb2_ops_wait_finish,

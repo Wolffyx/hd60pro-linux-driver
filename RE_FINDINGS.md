@@ -15427,3 +15427,204 @@ the non-zero case: that a source WITH audio produces the expected samples
 (channel order, endianness). Test with a PC or console output when one is
 available. The competing-daemons caveat stands for any future audio run: cold
 boot first, because each audio-enabled load leaves another capture app running.
+
+## M247 (2026-10-12): the cleanup - 21k lines to 10k, the card told the same thing, and the UX gaps closed
+
+Not a discovery: a consolidation, so that the next one has less to read. Two
+independent read-only audits checked it before any hardware ran.
+
+**What went.** Every path the default configuration never reaches: the nosg
+fake-frame path and extent watcher, the legacy fw=5 poll-drain and the
+stream_bufs window-0 registration (never given to the card since M211), the
+M209-M212 raw-bank discriminators, the BAR5 "property experiment" machinery and
+`/proc/mz0380-experiment|-control|-snapshot|-scan|-periph-scan|-events|-cardlog|
+-buf0|-cmd`, the MST3367 wscan/ramtest/edidhunt/bit-bang tools, the RE "mailbox
+scan" that ran on a CMD_INIT failure, and ~50 harness scripts for closed
+milestones. Module parameters went from 148 to 17; each card-facing knob became
+a constant at its single point of use, holding the value every run since M216
+used. This reverses the M245-era note "mark deprecated rather than delete" -
+the operator chose deletion; git history keeps everything.
+
+**What the card is told is unchanged.** A command-by-command audit against HEAD
+(4a5c270) found every opcode, parameter word, timeout and BAR write on the
+default path identical and in the same order - SET_VIC
+`{06073c00 04380780 0 02010101 0 04380780 1 0 80800000}` for 1080p60, SET_ENC
+main `{3fff 203c0000 18 00400000 ...}` and sub `{3fff 1e3c0100 18 003d0900 ...}`,
+SET_PREVIEW `{01|00 00003c00 00010001 0 0}`, SET_AIC
+`{00100002 0000bb80 00040100 00000101}`. The intended differences are all
+removals: no BAR5 sync/trace reads at probe, no dir_invert=0 reset pass (every
+archived log failed it and retried with 1), no 0xae / HPD GPIO / 0xb7
+read-backs, no output-diag burst after STOP, no hactive reads per measurement,
+no output-stage re-commit for an unchanged mode, no full receiver measurement
+for an idle ENUMINPUT. `insmod mz0380.ko dyndbg='format ^mbx +p'` now logs one
+line per mailbox command, and `scripts/mz0380-m247-verify.sh` diffs that trace
+between `ko/baseline/mz0380.ko` (HEAD + the trace) and this tree on hardware.
+
+**Defects found and fixed on the way:**
+
+- **M238 was half right.** The chroma test sampled U and V as one region and
+  passed a slot as soon as one sample had colour - so U written with V still
+  clear passed, which is the green/magenta cast frame, and is exactly the
+  16/32 high-water mark M244 kept reporting. V is written last, so V decides
+  now. And a slot whose V is uniformly 0x80 - a black, grey or navy screen -
+  was held back forever, freezing raw capture on the frame before a fade; it
+  is now delivered once it has read that way for one frame period (a fill
+  completes within one). Counter: `colourless frames passed on a second look`.
+- **The M222 tear check never fired.** It required all four sentinels to be
+  rewritten during a ~1 ms copy, i.e. the card rewriting the bottom half of a
+  frame; any one changing now discards the frame.
+- **Raw nodes had no NO SIGNAL picture** (M225 withheld the H.264 one and let
+  the queue stall, which browsers and conferencing apps treat as a dead camera
+  after ~10 s). A black frame with NO SIGNAL lettering is rendered at the
+  negotiated geometry at 2 fps once live raw frames have been absent for 1 s.
+- **An unsupported fourcc in S_FMT switched the node to H.264** and marked the
+  encoder for replacement - one spawn for asking for YUYV. It keeps the current
+  format now. Replacement is decided by comparing against what the running
+  pipeline was started with, so toggling a setting and back, or changing the
+  H.264 bitrate while delivering raw, no longer spends a spawn.
+- **Idle ioctls** (ENUMINPUT, QUERY_DV_TIMINGS) did a full receiver measurement,
+  polling up to 2 s under the device lock with no source; one R55 read now
+  answers an unlocked receiver.
+- **Stale state after the application closed:** with the persistent pipeline
+  detached the monitor stops, so lock was reported until the next STREAMON.
+  The detached drain's frame clock now says whether the source is there.
+- **One S_DV_TIMINGS (v4l2-compliance runs one) relabelled every later frame
+  interlaced/progressive for the module's lifetime;** it is undone at last close.
+- **ENUM_DV_TIMINGS listed 640x480 and 576p,** which detection can never report;
+  it lists the 11 modes the receiver recognises.
+- **The signal monitor's busy loops:** a pending replacement with the producer
+  alive re-measured (~30 commands + a log line) every 500 ms; an unsupported
+  mode kept the mailbox ~80 % busy; a silent producer alternated measurements
+  and logs forever. Now 2 s, 3 s with an early exit, and once per silence.
+- **After S3 resume, SET_AIC was never re-sent** (aic_armed survived a card that
+  cold-booted), so the encoder would complete no frames (M33).
+- **INTx was unmasked before the handler existed,** and left unmasked after a
+  failed DMA setup.
+- **NV12** chroma interleave eight bytes at a time instead of one; YU12 one copy
+  instead of two; raw frames are timestamped before their copy; the H.264 NAL
+  walk is one pass that stops at the first slice (the M212 reference stream
+  confirms SPS/PPS always precede it).
+
+**User-facing:** dmesg is a handful of lines per load and one per real event
+(`HDMI signal: 1920x1080p@60`, `HDMI signal lost`, `encoder started ... spawn N`);
+`v4l2-ctl --log-status` prints signal, format, encoder and spawn state; the
+Makefile builds each kernel with the compiler that built it (the gcc 6.18 LTS
+kernel failed under clang); `make install` no longer builds as root; DKMS copies
+only sources and re-installs cleanly.
+
+**Not yet run on hardware.** Prediction for `scripts/mz0380-m247-verify.sh`:
+the baseline and M247 traces carry identical 0x29/0x2d/0x31/0x02/0x08/0x04/0x2a/
+0x06/0x07 commands; the diff is receiver reads only (fewer in M247);
+v4l2-compliance passes; YUYV TRY_FMT returns YU12; unplugging during a raw
+capture raises `raw NO SIGNAL frames delivered` and replugging ends it with no
+new spawn. Historical docs moved to `docs/history/`.
+
+## M248 (2026-10-12): the first M247 run - an empty trace, compliance without a source, and the camera that leaves at every load
+
+First run of `scripts/mz0380-m247-verify.sh` (3 spawns, power cycle total 3).
+What passed: both modules delivered 300/300 raw frames with no drops, the
+pictures match (frame means Y 74-84, U 127-128, V 130-131 on both, frames
+changing), and the unplug/replug check behaved as
+predicted - `raw NO SIGNAL frames delivered` 15 while unplugged, placeholder
+`not shown` after replug, spawns unchanged. M247 needed 0 stub skips and 0
+luma-clear skips where the baseline needed 1 and 4.
+
+Three things did not:
+
+**1. Phase 1 proved nothing: both traces were empty.** `dyndbg: unclosed
+quote: mbx` and `unknown parameter ' +p' ignored` at both loads. insmod wraps
+a parameter value that contains spaces in `"..."`, so
+`dyndbg='format "mbx " +p'` reached the kernel as `dyndbg="format "mbx " +p"`,
+which the parameter parser splits at the inner quote. The query is now
+`dyndbg='format ^mbx +p'` (no inner quotes; `^` anchors the match) in
+`mz0380-live.sh`, the README and the mailbox.c comment. The script also
+follows the log with `dmesg -w` for each traced load: a full trace does not
+fit the 128 KiB ring (`CONFIG_LOG_BUF_SHIFT=17`), and the bring-up lines would
+have been the first overwritten.
+
+**2. v4l2-compliance: 3 failures, one cause.** The run happened with no
+source - the camera had left HDMI mode at load (point 3) and came back 7 s
+later, after the test. `checkTimings` (v4l2-test-io-config.cpp:239 in 1.32)
+saves G_DV_TIMINGS, sets every enumerated timing, then restores the saved
+one. With nothing ever detected, G returned the empty `mz0380_no_signal`,
+S_DV_TIMINGS rejected it with EINVAL, and the test stopped right there - with
+the last enumerated timing, 720x480, still set and before its QUERY could
+clear the startup source geometry. So G_FMT said 720x480 while TRY/S_FMT
+snapped to the 1920x1080 "source", which is the two format failures.
+Fixed twice over:
+- G_DV_TIMINGS answers `mz0380_default_timings` (1080p60, the capture's
+  startup geometry) until a source is detected or a timing is set, and again
+  when the last handle closes with no source. QUERY still says ENOLINK.
+- TRY/S_FMT take their geometry from timings the application set itself before
+  the detected source (M172 said the format follows S_DV_TIMINGS; M223 then
+  let the source override it). A set timing that differs from the source is
+  still refused at STREAMON (`mz0380_check_geometry`).
+M243's "compliance clean" was measured with a source present, which is why
+this never showed.
+
+**3. Every module load cost the source.** Operator report: the DSLR leaves
+HDMI mode at every driver load, and may not come back. Every load ran the full
+bring-up: receiver reset (pin9 1->0->1), init with HPD parked off, the EDID
+push, then HPD on - about half a second of hot-plug low, which a camera reads
+as an unplug. `live.sh load` also runs the smoke test first, so it was two
+unplugs per load. On this run the camera took 3 s (m247 load) and 7 s
+(phase 2 load) to come back.
+
+Nothing in the unload path touches the receiver or the GPIOs, so after a
+reload the receiver still holds everything the previous load set. Bring-up now
+reads four BANK0 values only its own init leaves and nothing rewrites
+(`ad=05 b4=54 51=89`, all read back on hardware in M43/M101, and `b7=00`, HPD
+asserted, the last step). All four match: keep the receiver, no reset, no
+GPIO write, no hotplug; log `HDMI receiver kept from the previous load`. Any
+mismatch, including the all-zero reads of a receiver still in reset after
+power-up, takes the full path as before. Either way the cached mode is
+dropped, so the first lock commits and latches the output stage again. The
+first load after a power-up still resets the receiver - unavoidable, it powers
+up held in reset - and so does every load of the baseline module.
+
+Not explained, not chased: after the replug, dmesg had `signal back`, then
+`signal lost` 6 s later, then `back` 8 s after that. The monitor writes
+nothing to a locked receiver (M233), so this looks like the camera
+renegotiating.
+
+Verify script reworked for the next run: this tree's traced load goes first
+(cold, like the baseline's), phase 2 checks the receiver was kept at both
+loads and how fast the source locks, runs v4l2-compliance with the source and
+again with it unplugged, and prints `!!` for every failed expectation.
+
+### M248 run 2 (same power cycle, no cold boot; spawns 3 -> 6)
+
+- **Receiver kept at every load of this tree** - m247 phase 1 and both phase 2
+  loads (smoke + real). The trace shows the whole cost: one bank select and
+  four reads (`ad b4 51 b7`), then nothing until the capture. HDMI signal
+  logged 0.2 s after `registered video0`; with the reset it had been 3-7 s.
+- **Encoder commands identical** to the baseline (HEAD): 0x29 0x2d 0x31 0x02
+  0x08 0x04 0x2a 0x06 0x07 match in count and arguments. The other 357 lines
+  of the diff are the baseline's bring-up (GPIO 0x14/0x15/0x17, I2C 0x1a/0x1b,
+  EDID 0x1e/0x1f), which this tree skipped because the receiver was kept - so
+  the cold bring-up of this tree is still untraced (needs a cold boot).
+- The baseline's cold bring-up held HPD low 0.53 s and its source was back
+  1.0 s after HPD rose. The camera is not consistent about it (3-7 s in run 1).
+- **v4l2-compliance 48/48 with the source, and 48/48 with it unplugged.**
+- NO SIGNAL across an unplug: 15 raw NO SIGNAL frames while unplugged, 45 by
+  replug, `not shown` after it, spawns unchanged. One clean lost/back pair this
+  time - the extra drop of run 1 did not recur.
+- **The YUYV check has never reached the driver, in either run.** v4l2-ctl
+  looks the fourcc up in ENUM_FMT itself and stops with "The pixelformat
+  'YUYV' is invalid" before any ioctl (`vidcap_get_and_update_fmt`,
+  v4l2-ctl-vidcap.cpp, 1.32); the one `Pixel Format: 'YU12'` line in both runs
+  came from `--get-fmt-video`. Run 1's "pass" was a misread. The script now
+  issues TRY_FMT and S_FMT itself (`fourcc_check`, python fcntl), tested
+  against a mock that keeps the format and one that flips it to H.264.
+
+### M248 run 3: the YUYV check, at last on the driver (zero spawns)
+
+The first try read `format H264 before, H264 after` - OBS had been started
+right after the load, set H.264 and spent the encoder spawn (power cycle total
+now **7**). That proves nothing: the pre-M247 bug also answered H.264. From
+YU12 (S_FMT only, no streaming): YUYV and MJPG both gave `TRY_FMT -> YU12,
+S_FMT -> YU12`, format YU12 1920x1080 before and after, spawns unchanged.
+**M247's unsupported-fourcc fix holds.** `fourcc_check` now sets YU12 itself
+first and restores the original format afterwards, so whatever an application
+left behind cannot make it pass; a mock of the pre-M247 driver starting from
+H.264 is flagged.

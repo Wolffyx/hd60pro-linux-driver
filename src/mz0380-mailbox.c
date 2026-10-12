@@ -6,81 +6,6 @@
 #include "mz0380.h"
 
 
-/*
- * Mailbox command send.
- *
- * Protocol confirmed against both the Windows transport and ep.ko:
- *   1. clear the shared PARAM10/STATUS word before installing payload
- *   2. write opcode to PARAM0 and up to ten arguments to PARAM1..PARAM10
- *   3. ring BAR0+0x00 with 0x800
- *   4. unless explicitly asynchronous, wait for STATUS or EVENT completion;
- *      a full-width command can wait only for EVENT because STATUS is payload
- *
- * The public helper serialises transactions with dev->cmd_lock. Peripheral
- * reads use the internal locked form so the lock also covers their late result.
- */
-/*
- * Ack/rearm one card event, exact write order of the Windows event
- * thread (FUN_140284380): BAR5 flag first, then the BAR0 event word,
- * then the 0x400 doorbell. Also deasserts INTx.
- */
-/*
- * M4 diagnostic: empirically locate the post-boot mailbox layout.
- *
- * ep.ko (card side) allocates a fresh dma_coherent(0x60) command buffer on boot
- * and maps host BAR0 to it via the inbound window based at dma_handle+4, so the
- * post-boot opcode/STATUS offsets differ from the bootloader's (which we use).
- * Rather than guess the offset, sweep candidate (opcode_off, doorbell_off)
- * layouts: for each, issue GET_BOARD_VERSION and see whether any word in the
- * 0x60 mailbox region changes away from the 0xdddddddd poison / our own writes.
- * Read-modify only within the 0x60 mailbox aperture - safe.
- */
-void mz0380_mailbox_scan(struct mz0380_dev *dev)
-{
-	static const u32 op_off[]   = { 0x00, 0x04 };
-	static const u32 bell_off[] = { 0x00, 0x04 };
-	unsigned int oi, bi, w;
-
-	pr_info("%s: mailbox scan: baseline region dump:\n", dev->name);
-	for (w = 0; w < 0x60; w += 4)
-		pr_info("%s:   base[0x%02x] = %08x\n", dev->name, w,
-			mz_mmio_read(dev, w));
-
-	for (oi = 0; oi < ARRAY_SIZE(op_off); oi++) {
-		for (bi = 0; bi < ARRAY_SIZE(bell_off); bi++) {
-			u32 o = op_off[oi], b = bell_off[bi];
-			bool changed = false;
-
-			/* clear the region we own, without touching the poison
-			 * word until after, so we can spot a real card write */
-			for (w = 0; w < 0x60; w += 4)
-				if (w != MZ0380_MB_STATUS)
-					mz_mmio_write(dev, w, 0);
-			/* opcode GET_BOARD_VERSION at candidate offset */
-			mz_mmio_write(dev, o, MZ0380_CMD_GET_BOARD_VERSION);
-			wmb();
-			mz_mmio_write(dev, b, MZ0380_MB_FIRE);
-			msleep(50);
-
-			for (w = 0; w < 0x60; w += 4) {
-				u32 v = mz_mmio_read(dev, w);
-
-				if (v != 0 && v != 0xdddddddd &&
-				    v != MZ0380_CMD_GET_BOARD_VERSION) {
-					pr_info("%s: scan op@0x%02x bell@0x%02x: base[0x%02x]=%08x (RESPONSE?)\n",
-						dev->name, o, b, w, v);
-					changed = true;
-				}
-			}
-			if (!changed)
-				pr_info("%s: scan op@0x%02x bell@0x%02x: no change\n",
-					dev->name, o, b);
-			mz0380_mb_ack_event(dev);
-		}
-	}
-	pr_info("%s: mailbox scan done\n", dev->name);
-}
-
 static void mz0380_mb_snapshot_reply(struct mz0380_dev *dev)
 {
 	unsigned int i;
@@ -92,6 +17,11 @@ static void mz0380_mb_snapshot_reply(struct mz0380_dev *dev)
 			mz_mmio_read(dev, MZ0380_MB_PARAM(i));
 }
 
+/*
+ * Ack/rearm one card event, exact write order of the Windows event thread
+ * (FUN_140284380): BAR5 flag first, then the BAR0 event word, then the 0x400
+ * doorbell. Also deasserts INTx.
+ */
 void mz0380_mb_ack_event(struct mz0380_dev *dev)
 {
 	unsigned long flags;
@@ -131,24 +61,38 @@ void mz0380_mb_ack_event(struct mz0380_dev *dev)
 }
 
 /*
- * M118: the credit re-arm, lifted out of the ISR so the poll-drain can fire the
- * same sequence. The card's completion channel is a one-shot: msi_enable is
- * consumed when it posts an event and only this doorbell restores it. On the
- * poll path no event ever posts, so nothing has ever re-armed it.
+ * One line per mailbox transaction, under dynamic debug:
+ *
+ *     insmod mz0380.ko dyndbg='format ^mbx +p'
+ *
+ * The card is driven only through this mailbox, so the sequence of these lines
+ * IS what the card was told. Diffing two of them is how a refactor proves it
+ * left the card's view unchanged.
  */
-void mz0380_credit_rearm(struct mz0380_dev *dev)
+static void mz0380_mb_trace(struct mz0380_dev *dev, u32 opcode,
+			    const u32 *params, unsigned int nparams,
+			    unsigned int timeout_ms, int ret, u32 status)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&dev->event_lock, flags);
-	mz_cfg_write(dev, MZ0380_CFG_INT_FLAG, MZ0380_CFG_INT_ACK_VAL);
-	mz_mmio_write(dev, MZ0380_MB_EVENT, 0);
-	wmb();
-	mz_mmio_write(dev, MZ0380_MB_DOORBELL, MZ0380_MB_INT_ACK);
-	spin_unlock_irqrestore(&dev->event_lock, flags);
+	dev_dbg(&dev->pci->dev, "mbx op=0x%02x t=%u ret=%d status=%08x args[%u]=%*ph\n",
+		opcode, timeout_ms, ret, status, nparams,
+		(int)(nparams * sizeof(*params)), params);
 }
 
-/* dev->cmd_lock must remain held until any opcode-specific late reply is read. */
+/*
+ * Mailbox command send.
+ *
+ * Protocol confirmed against both the Windows transport and ep.ko:
+ *   1. clear the shared PARAM10/STATUS word before installing payload
+ *   2. write opcode to PARAM0 and up to ten arguments to PARAM1..PARAM10
+ *   3. ring BAR0+0x00 with 0x800
+ *   4. unless explicitly asynchronous, wait for STATUS or EVENT completion;
+ *      a full-width command can wait only for EVENT because STATUS is payload
+ *
+ * The public helper serialises transactions with dev->cmd_lock. Peripheral
+ * reads use the internal locked form so the lock also covers their late result.
+ *
+ * dev->cmd_lock must remain held until any opcode-specific late reply is read.
+ */
 static int mz0380_send_command_locked(struct mz0380_dev *dev, u32 opcode,
 				       const u32 *params,
 				       unsigned int nparams,
@@ -226,8 +170,10 @@ static int mz0380_send_command_locked(struct mz0380_dev *dev, u32 opcode,
 	 * PARAM10 cannot poll that shared word, but a non-zero timeout still waits
 	 * for EVENT CMD_DONE, matching Windows' semaphore path for SET_BUF.
 	 */
-	if (!timeout_ms)
+	if (!timeout_ms) {
+		mz0380_mb_trace(dev, opcode, params, nparams, 0, 0, 0);
 		return 0;
+	}
 
 	{
 		/*
@@ -334,6 +280,7 @@ static int mz0380_send_command_locked(struct mz0380_dev *dev, u32 opcode,
 		}
 	}
 
+	mz0380_mb_trace(dev, opcode, params, nparams, timeout_ms, ret, status);
 	if (status_out)
 		*status_out = status;
 	return ret;
@@ -404,7 +351,7 @@ int mz0380_card_init(struct mz0380_dev *dev)
 	unsigned int attempt;
 	unsigned long started = jiffies;
 	unsigned long deadline = started +
-		msecs_to_jiffies(mz0380_card_ready_timeout_ms);
+		msecs_to_jiffies(MZ0380_CARD_READY_TIMEOUT_MS);
 	u32 init_reply[2] = { 0 };
 	u32 status = 0;
 	int ret = -ETIMEDOUT;
@@ -429,8 +376,7 @@ int mz0380_card_init(struct mz0380_dev *dev)
 		ret = mz0380_send_command_reply(
 			dev, MZ0380_CMD_INIT, NULL, 0, &status, 600,
 			init_reply, ARRAY_SIZE(init_reply));
-		if (!ret || !mz0380_card_ready_timeout_ms ||
-		    time_after_eq(jiffies, deadline))
+		if (!ret || time_after_eq(jiffies, deadline))
 			break;
 		msleep(100);
 	}
@@ -444,8 +390,6 @@ int mz0380_card_init(struct mz0380_dev *dev)
 			mz_cfg_read(dev, MZ0380_CFG_INT_FLAG),
 			mz_cfg_read(dev, MZ0380_CFG_NOTIFY_PTR0),
 			mz_cfg_read(dev, MZ0380_CFG_NOTIFY_PTR1));
-		if (mz0380_dma_handshake)
-			mz0380_mailbox_scan(dev);
 		return ret;
 	}
 	pr_info("%s: CMD_INIT answered on attempt %u after %ums (status=0x%08x)\n",
@@ -483,7 +427,7 @@ int mz0380_card_init(struct mz0380_dev *dev)
 		return ret;
 	}
 
-	pr_info("%s: board reports running firmware %u.%u (status=0x%08x)\n",
+	dev_dbg(&dev->pci->dev, "%s: board reports running firmware %u.%u (status=0x%08x)\n",
 		dev->name, dev->fw_version_major, dev->fw_version_minor,
 		status);
 	return 0;
@@ -533,7 +477,7 @@ int mz0380_periph_read(struct mz0380_dev *dev, u8 chip, u8 reg, u32 *val)
 						 params, ARRAY_SIZE(params),
 						 NULL, 1000);
 		if (ret) {
-			pr_info("%s: REG_READ chip=0x%02x reg=0x%02x failed (%d), STATUS=%08x EVENT=%08x RESULT=%08x P3=%08x\n",
+			pr_warn_ratelimited("%s: REG_READ chip=0x%02x reg=0x%02x failed (%d), STATUS=%08x EVENT=%08x RESULT=%08x P3=%08x\n",
 				dev->name, chip, reg, ret,
 				mz_mmio_read(dev, MZ0380_MB_STATUS),
 				mz_mmio_read(dev, MZ0380_MB_EVENT),

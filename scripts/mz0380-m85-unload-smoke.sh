@@ -29,12 +29,11 @@
 #
 # What it exercises
 # -----------------
-# enable_dma=1 is REQUIRED: mz0380_irq_request() is gated on it, and without a
-# request_irq there is no free_irq and therefore no DEBUG_SHIRQ callback - the
-# exact bug would slip through. enable_video=0 skips v4l2 registration, and dma_handshake=1 lets the card
-# handshake succeed so the cycle exercises a realistic teardown. Nothing is
-# ever uploaded - the card runs its own flash image. No STREAMON, no SET_VIC,
-# no encoder spawn.
+# A full probe - card handshake, request_irq (so free_irq and its DEBUG_SHIRQ
+# callback run on the way out), DMA windows, receiver bring-up - with
+# enable_video=0, so no V4L2 node appears for the desktop to open and pin the
+# module. Nothing is ever uploaded - the card runs its own flash image. No
+# STREAMON, no SET_VIC, no encoder spawn.
 set -u
 cd "$(dirname "$0")/.."
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
@@ -54,12 +53,11 @@ sleep 1
 modprobe -a videodev videobuf2-v4l2 videobuf2-vmalloc v4l2-dv-timings snd-pcm
 dmesg -C
 
-echo "=== load (enable_dma=1: reaches request_irq, which is the point) ==="
-insmod "$MZKO" enable_dma=1 enable_video=0 dma_handshake=1 \
-	irq_intx="${INTX:-1}" || fail "insmod failed"
+echo "=== load (no V4L2 node; the IRQ is requested, which is the point) ==="
+insmod "$MZKO" enable_video=0 || fail "insmod failed"
 
 sleep 2
-dmesg | grep -E "interrupt:|IRQ .* ready" | tail -3
+dmesg | grep -E "mz0380" | tail -3
 
 echo
 echo "=== unload (CONFIG_DEBUG_SHIRQ makes free_irq re-enter our ISR here) ==="
@@ -79,8 +77,3 @@ if lsmod | grep -qE "^mz0380"; then
 fi
 
 echo "clean: loaded, bound, unloaded, no kernel complaints, module gone."
-echo
-echo "Run it for BOTH interrupt paths - the MSI path cannot reach the shared-IRQ"
-echo "teardown window, so a pass there proves nothing about INTx:"
-echo "    sudo INTX=1 $0      # what Windows uses, and the risky one"
-echo "    sudo INTX=0 $0      # MSI"

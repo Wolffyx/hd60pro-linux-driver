@@ -17,15 +17,12 @@
 const struct mz0380_board mz0380_boards[] = {
 	[MZ0380_BOARD_UNKNOWN] = {
 		.name = "UNKNOWN/GENERIC",
-		.windows_driver = "unknown",
 	},
 	[MZ0380_BOARD_ELGATO_HD60_PRO] = {
 		.name = "Elgato Game Capture HD60 Pro",
-		.windows_driver = "e60MZ0380.X64.SYS",
 	},
 	[MZ0380_BOARD_ELGATO_HD60_PRO_REV3] = {
 		.name = "Elgato Game Capture HD60 Pro (Rev.3)",
-		.windows_driver = "e60MZ0380.X64.SYS",
 	},
 };
 const unsigned int mz0380_bcount = ARRAY_SIZE(mz0380_boards);
@@ -51,26 +48,35 @@ const unsigned int mz0380_idcount = ARRAY_SIZE(mz0380_subids);
 
 void mz0380_card_list(struct mz0380_dev *dev)
 {
-	int i;
+	unsigned int i;
 
-	if (dev->pci->subsystem_vendor == 0 &&
-	    dev->pci->subsystem_device == 0) {
-		pr_info("%s: Board has no valid PCIe subsystem ID.\n"
-			"%s: Pass card=<n> as an insmod option to override autodetect.\n",
-			dev->name, dev->name);
-	} else {
-		pr_info("%s: Board %04x:%04x is not known to the driver.\n"
-			"%s: Pass card=<n> as an insmod option to override autodetect.\n",
-			dev->name,
-			dev->pci->subsystem_vendor,
-			dev->pci->subsystem_device,
-			dev->name);
-	}
-
-	pr_info("%s: Valid card=<n> values are:\n", dev->name);
+	dev_warn(&dev->pci->dev,
+		 "board %04x:%04x is not known to the driver; pass card=<n> to override autodetect:\n",
+		 dev->pci->subsystem_vendor, dev->pci->subsystem_device);
 	for (i = 0; i < mz0380_bcount; i++)
-		pr_info("%s:    card=%d -> %s\n",
-			dev->name, i, mz0380_boards[i].name);
+		dev_warn(&dev->pci->dev, "    card=%u -> %s\n",
+			 i, mz0380_boards[i].name);
+}
+
+/*
+ * These boards have one physical capture connector, and HDMI is VIC route 0:
+ * BAR5 property 201 (reg 0x40, bits 2:0). The property survives warm reloads,
+ * so inheriting its previous value can leave the VIC routed to a front end
+ * this board does not have while the MST3367 is receiving HDMI correctly.
+ * Select the route explicitly before the receiver is released and HPD rises.
+ */
+static void mz0380_select_hdmi_route(struct mz0380_dev *dev)
+{
+	u32 before = mz_cfg_read(dev, MZ0380_REG_PROP_INPUT);
+	u32 want = before & ~MZ0380_PROP_INPUT_MASK;
+	u32 readback;
+
+	mz_cfg_write(dev, MZ0380_REG_PROP_INPUT, want);
+	readback = mz_cfg_read(dev, MZ0380_REG_PROP_INPUT);
+	if (readback != want)
+		dev_warn(&dev->pci->dev,
+			 "HDMI route select did not stick (BAR5[0x%02x] %08x -> %08x, read back %08x)\n",
+			 MZ0380_REG_PROP_INPUT, before, want, readback);
 }
 
 int mz0380_card_setup(struct mz0380_dev *dev)
@@ -78,13 +84,6 @@ int mz0380_card_setup(struct mz0380_dev *dev)
 	int ret;
 
 	mz0380_capture_state_init(dev);
-	mz0380_sync_hw_input_select(dev, "probe");
-	mz0380_sync_hw_quality(dev, "probe");
-	mz0380_sync_hw_gop(dev, "probe");
-	mz0380_sync_hw_bitrate(dev, "probe");
-	mz0380_sync_hw_b_frames(dev, "probe");
-	mz0380_sync_hw_qp_step(dev, "probe");
-	mz0380_sync_hw_record_mode(dev, "probe");
 
 	switch (dev->board) {
 	case MZ0380_BOARD_ELGATO_HD60_PRO:
@@ -94,28 +93,18 @@ int mz0380_card_setup(struct mz0380_dev *dev)
 		return 0;
 	}
 
-	/*
-	 * These boards have one physical capture connector: HDMI is V4L2 input
-	 * zero.  BAR5 property 201 survives warm reloads, so merely inheriting its
-	 * previous value can leave the VIC routed to an unrelated front end while
-	 * the MST3367 is correctly receiving HDMI.  Select the route explicitly
-	 * before releasing the receiver and raising HPD.
-	 */
-	ret = mz0380_request_input_select(dev, 0, "HD60 Pro bring-up");
-	if (ret)
-		pr_warn("%s: could not select the HDMI VIC route (%d)\n",
-			dev->name, ret);
+	mz0380_select_hdmi_route(dev);
 
 	/*
-	 * Release the MST3367 from reset and apply its init now (non-fatal if the
-	 * firmware is not ready yet). This wakes the HDMI input at probe; a later
-	 * VIDIOC_QUERY_DV_TIMINGS re-runs it lazily if it was skipped here.
+	 * Release the MST3367 from reset and apply its init now (non-fatal if
+	 * the card is not ready yet: the first signal query retries it). This
+	 * wakes the HDMI input at probe, so a source sees a sink straight away.
 	 */
 	mz0380_mst3367_bringup(dev);
 
 	if (!mz0380_enable_video) {
-		pr_info("%s: probe-safe V4L2 node disabled; load with enable_video=1 when you want /dev/video*\n",
-			dev->name);
+		dev_info(&dev->pci->dev,
+			 "V4L2 node disabled (enable_video=0)\n");
 		return 0;
 	}
 
@@ -125,10 +114,10 @@ int mz0380_card_setup(struct mz0380_dev *dev)
 
 	if (mz0380_enable_audio) {
 		ret = mz0380_audio_register(dev);
-		if (ret) {
-			pr_warn("%s: audio register failed (%d) - continuing without ALSA\n",
-				dev->name, ret);
-		}
+		if (ret)
+			dev_warn(&dev->pci->dev,
+				 "audio register failed (%d) - continuing without ALSA\n",
+				 ret);
 	}
 
 	return 0;
