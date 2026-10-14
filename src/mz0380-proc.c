@@ -155,12 +155,17 @@ static void mz0380_state_receiver(struct seq_file *m, struct mz0380_dev *dev)
 	static const char * const cs_names[] = {
 		"RGB", "YUV422", "YUV444", "undefined"
 	};
+	/* M252: AVI InfoFrame Q1:Q0 - what the source says its RGB range is */
+	static const char * const q_names[] = {
+		"default", "limited", "full", "reserved"
+	};
 	unsigned long last = READ_ONCE(dev->last_h264_frame_stamp);
 
 	if (dev->mst_b2_48_valid)
-		seq_printf(m, "  colourspace: source %s (0x48=%02x cached)",
+		seq_printf(m, "  colourspace: source %s, RGB range %s (0x48=%02x 0x4a=%02x cached)",
 			   cs_names[(dev->mst_b2_48 & 0x60) >> 5],
-			   dev->mst_b2_48);
+			   q_names[(dev->mst_b2_4a >> 2) & 3],
+			   dev->mst_b2_48, dev->mst_b2_4a);
 	else
 		seq_puts(m, "  colourspace: not yet read");
 	if (dev->mst_csc_applied_valid)

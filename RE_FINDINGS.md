@@ -15811,3 +15811,56 @@ Predictions, written before any run (any raw capture of >= 600 frames):
 - **B:** card events almost all in `1`; frames taken show ~1/8 in `<.25` and
   ~1/8 in `2`; slots ready per scan mostly 2; events per drain with ~1/8 at 2.
 - Either way, frames taken `<.25` ~ 12% (1/8) of the total, as measured.
+
+## M252 (static, 2026-10-14): the MST3367 CSC format cracked - RGB sources get a +10 luma lift and clipped whites
+
+M250's GPU run put RGB black at **Y = 11** (video black is 16). Answer, from the
+HD60 Pro Windows driver's own CSC writer (`e60MZ0380.X64.SYS` FUN_14024c894 and
+its 16-bit helper 0x140274aec: `reg+1 = lo`, `reg = (v >> 8) & 0x7f`):
+
+- Every coefficient and offset is **15-bit two's complement, big-endian, 4096 =
+  1.0**; offsets in **1/64 code** (0x2000 = 128).
+- Layout grouped by INPUT: R at 0x93/0x95/0x97, G at 0x99/0x9b/0x9d, B at
+  0x9f/0xa1/0xa3, each [Cr, Y, Cb]; offsets Cr 0xa5, Y 0xa7, Cb 0xa9. The
+  `M11..M33` labels in our source do not describe it.
+- **Checked independently of the disassembly:** under this encoding our table
+  decodes to Y = 0.2122R + 0.7122G + 0.0720B, Cr = 0.5005R - 0.4548G -
+  0.0457B, Cb = -0.1152R - 0.3853G + 0.5005B - BT.709 to three decimals
+  (0.2126/0.7152/0.0722), both chroma rows summing to exactly 0. A wrong guess
+  does not land on BT.709.
+- Offsets: Cr 128.0, **Y +10.02**, Cb 128.016. So the table is a FULL-SWING
+  BT.709 matrix plus a 10-code luma lift: RGB 0 -> Y 10, RGB 255 -> 264,
+  clipped to 255 (the top ~9 codes of highlights are lost). Measured 11 fits a
+  full-range source whose black is 1 (dither); a limited-range source would
+  read 26. Chroma 128 exactly on any grey: consistent (truncation, not
+  rounding - Cb's 128.016 shows as 128).
+
+Corrections to this file:
+- M130's "the coefficient fixed-point format is NOT cracked" - superseded.
+- M127's "36-byte CSC table at 0x92..0xb5" - it is **31 bytes, 0x92..0xb0**.
+  Its tail rewrites 0xab..0xb0, including **0xae = 0x20** - which is exactly
+  why M101 saw "bit 2 does not stick": our own table cleared it right after
+  RxVideoInit set it, not the hardware.
+
+The node is labelled limited range (V4L2 default, `raw_full_range=0`), so the
+right output is 16-235. Candidates (bytes for 0x93..0xaa; 0x92 = 0x40):
+- **A, full RGB -> limited BT.709:** `07 07 02 EC 7E 64 79 9E 09 D4 7A 95
+  7F 5B 00 FE 07 07 20 00 04 00 20 00` - every byte recomputed here from the
+  BT.709 constants (x219/255 luma, x224/255 chroma, Y offset 16 = 0x0400).
+  Full input: black 16, white 235.
+- **B, limited -> limited (the Windows default, offset 0):** `08 2D 03 66 7E 21
+  78 94 0B 71 79 B3 7F 40 01 27 08 2D 20 00 00 00 20 00`.
+- **C, select by what the source declares**, as Windows does: AVI InfoFrame
+  Q1:Q0 = BANK2 0x4a bits 3:2 (next to 0x48's colour format) - full -> A,
+  limited -> B, default -> to be decided by measurement.
+YCbCr sources (the DSLR; 0x92 = 0 bypass) are unaffected by any of them.
+SD modes use BT.601 tables in Windows (0x1402d58d8).
+
+Not changed yet - measure first. The driver now reads 0x4a with 0x48 and
+`/proc/mz0380-state` prints `RGB range default/limited/full`; the new
+`scripts/mz0380-m252-range-test.sh` drives the GPU loop through KDE's RGB range
+automatic/full/limited (kscreen-doctor, mpv pattern half black/half white,
+all automatic) and measures black and white separately - and its first capture
+is long enough for the M251 rhythm counter. Predictions with the current
+table: full -> black ~10-11, white 255; limited -> black ~26, white ~244;
+chroma 128 everywhere; 0x4a shows the range KDE selected if amdgpu signals it.

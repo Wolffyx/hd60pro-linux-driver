@@ -1,6 +1,6 @@
 # NEXT SESSION START
 
-_Last updated 2026-10-14. Full history in **RE_FINDINGS.md** (M1-M250); this
+_Last updated 2026-10-14. Full history in **RE_FINDINGS.md** (M1-M252); this
 file is the handoff only._
 
 ## State (2026-10-14): M247 + M248 fully verified on hardware, kernel 7.2.9-2
@@ -59,15 +59,16 @@ Any hardware run: OBS closed (it grabs the node at load and spends spawns).
 `fourcc` and `coldtrace` modes are zero-spawn). No Claude attribution in
 commit or PR text.
 
-1. **The 8-frame delivery cadence** (M250): one frame in eight arrives a
-   period early, right behind its predecessor, then a two-period gap - at
-   30 and 60 fps, average exact. Judder candidate. Measure with the driver's
-   vb2 timestamps (`v4l2-ctl -v`, frames to a file) - 1 spawn.
-   Also from M250: RGB black lands at Y = 11 (below 16) - CSC offset or range
-   mismatch for PC/console sources; and a refresh-only source change (60 ->
-   50 Hz) is not noticed while frames flow.
-   (M247's chroma rule is DONE: verified with the GPU's HDMI looped into the
-   card - 219 exactly-neutral frames, all delivered at 60 fps.)
+1. **One run answers M251 and M252** (1 spawn, GPU HDMI looped into the card,
+   OBS closed, no hands needed): `sudo scripts/mz0380-m252-range-test.sh`.
+   - M251, the 8-frame rhythm: the `raw rhythm` line separates "the card's
+     events already come that way" (card events show ~1/8 at <.25 and ~2)
+     from "the drain delivers from a backlog" (card events all at 1, slots
+     ready mostly 2). Predictions in RE_FINDINGS M251.
+   - M252, RGB black at Y 11: the CSC table is cracked - full-swing BT.709
+     plus a +10 luma lift. The run measures black/white per declared range
+     and reads the AVI quantization bits (0x4a). Then pick the table (A full
+     -> limited, B limited -> limited, C select by 0x4a) - bytes in M252.
 2. **M246 audio with a source that has sound** (`sudo
    scripts/mz0380-m246-audio-test.sh`): channel order and byte order are the
    only open questions.
@@ -131,6 +132,7 @@ read it before believing the fix.**
 
 - `scripts/mz0380-m247-verify.sh` - the M247/M248 check above.
 - `scripts/mz0380-m247-black-test.sh` - raw capture through a black screen (M250).
+- `scripts/mz0380-m252-range-test.sh` - RGB range sweep on the GPU loop + rhythm (M252/M251).
 - `scripts/mz0380-m226-blackframe-scan.py` - reads delivered bytes: blank,
   partial, torn, duplicate frames, luma/chroma ranges. Touches no mailbox.
 - `scripts/mz0380-m230-flicker-watch.sh` - counter watch, prints on change.

@@ -333,6 +333,8 @@ struct mz0380_dev {
 	bool mst_gpio_dir_invert;
 	/* M133: last BANK2 0x48 (input colour space), read by the output diag. */
 	u8 mst_b2_48;
+	/* M252: and 0x4a, AVI PB3 - bits 3:2 the declared RGB quantization */
+	u8 mst_b2_4a;
 	bool mst_b2_48_valid;
 	u8 mst_csc_applied;
 	bool mst_csc_applied_valid;

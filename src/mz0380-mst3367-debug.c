@@ -206,6 +206,7 @@ void mz0380_mst3367_output_diag(struct mz0380_dev *dev, const char *tag)
 	u8 ad = 0, ae = 0, b4 = 0, b5 = 0;
 	u8 b2_01 = 0, b2_02 = 0, b2_07 = 0;
 	u8 b1_01 = 0, b1_34 = 0, b2_0b = 0, b2_0c = 0, b2_0e = 0, b2_48 = 0;
+	u8 b2_4a = 0;
 	bool link_read = false;
 
 	if (dev->fw_state != MZ0380_FW_STATE_READY || !dev->mst3367_ready)
@@ -244,6 +245,7 @@ void mz0380_mst3367_output_diag(struct mz0380_dev *dev, const char *tag)
 		mst_rd(dev, 0x0c, &b2_0c);
 		mst_rd(dev, 0x0e, &b2_0e);
 		mst_rd(dev, 0x48, &b2_48);
+		mst_rd(dev, 0x4a, &b2_4a);
 		mst_bank(dev, MST3367_BANK0);
 		/*
 		 * M133: cache it for mz0380_mst3367_apply_csc_mode(). This read
@@ -251,6 +253,7 @@ void mz0380_mst3367_output_diag(struct mz0380_dev *dev, const char *tag)
 		 * returned 0x00 while this returned 0xd2 156 ms later.
 		 */
 		dev->mst_b2_48 = b2_48;
+		dev->mst_b2_4a = b2_4a;
 		dev->mst_b2_48_valid = true;
 	}
 	/*
@@ -331,7 +334,7 @@ out:
  */
 int mz0380_mst3367_refresh_colourspace(struct mz0380_dev *dev)
 {
-	u8 b2_48;
+	u8 b2_48, b2_4a = 0;
 	int ret;
 
 	if (dev->fw_state != MZ0380_FW_STATE_READY || !dev->mst3367_ready)
@@ -341,8 +344,11 @@ int mz0380_mst3367_refresh_colourspace(struct mz0380_dev *dev)
 	ret = mst_bank(dev, MST3367_BANK2);
 	if (!ret)
 		ret = mst_rd(dev, 0x48, &b2_48);
+	if (!ret)
+		ret = mst_rd(dev, 0x4a, &b2_4a);
 	if (!ret) {
 		dev->mst_b2_48 = b2_48;
+		dev->mst_b2_4a = b2_4a;
 		dev->mst_b2_48_valid = true;
 	}
 	mst_bank(dev, MST3367_BANK0);
@@ -353,8 +359,8 @@ int mz0380_mst3367_refresh_colourspace(struct mz0380_dev *dev)
 			dev->name, ret);
 		return ret;
 	}
-	pr_info("%s: MST3367 colourspace re-read: 0x48=%02x\n",
-		dev->name, b2_48);
+	pr_info("%s: MST3367 colourspace re-read: 0x48=%02x 0x4a=%02x\n",
+		dev->name, b2_48, b2_4a);
 	return 0;
 }
 
