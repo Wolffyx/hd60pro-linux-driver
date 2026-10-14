@@ -106,6 +106,17 @@ static void mz0380_state_delivery(struct seq_file *m, struct mz0380_dev *dev)
 		   (unsigned long long)dev->raw_dup_content,
 		   (unsigned long long)dev->raw_frames_torn,
 		   (unsigned long long)dev->raw_multi_landed);
+	seq_printf(m, "  raw rhythm : spacing in frame periods <.25/.5/1/1.5/2/>2.25 - card events %u/%u/%u/%u/%u/%u, frames taken %u/%u/%u/%u/%u/%u; slots ready per scan 0-4 %u/%u/%u/%u/%u; events per drain 1/2/3+ %u/%u/%u (M251)\n",
+		   dev->cadence_event[0], dev->cadence_event[1],
+		   dev->cadence_event[2], dev->cadence_event[3],
+		   dev->cadence_event[4], dev->cadence_event[5],
+		   dev->cadence_take[0], dev->cadence_take[1],
+		   dev->cadence_take[2], dev->cadence_take[3],
+		   dev->cadence_take[4], dev->cadence_take[5],
+		   dev->cadence_ready[0], dev->cadence_ready[1],
+		   dev->cadence_ready[2], dev->cadence_ready[3],
+		   dev->cadence_ready[4], dev->cadence_batch[0],
+		   dev->cadence_batch[1], dev->cadence_batch[2]);
 }
 
 /* M246: the audio window. */

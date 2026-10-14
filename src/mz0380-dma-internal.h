@@ -25,6 +25,8 @@ u8 mz0380_raw_poison_byte(u32 idx);
 bool mz0380_raw_frame_landed(struct mz0380_dev *dev, u32 idx);
 bool mz0380_raw_frame_filled(struct mz0380_dev *dev, u32 idx);
 bool mz0380_raw_chroma_filled(struct mz0380_dev *dev, u32 idx);
+void mz0380_cadence_note(struct mz0380_dev *dev, u32 *hist, u64 *prev,
+			 u64 now);
 bool mz0380_raw_sentinel_rewritten(struct mz0380_dev *dev, u32 idx);
 void mz0380_raw_sentinel_save(struct mz0380_dev *dev, u32 idx, u32 out[4]);
 void mz0380_raw_sentinel_restore(struct mz0380_dev *dev, void *dst,

@@ -123,7 +123,7 @@ wait "$CAP"
 CAP=
 
 A=$(fills); D1=$(state 'raw frames' | grep -oE '^  raw frames : [0-9]+ delivered, [0-9]+' | grep -oE '[0-9]+' | tr '\n' ' ')
-state 'enc spawns|raw frames|raw fills' | sed 's/^/ /'
+state 'enc spawns|raw frames|raw fills|raw repeats|raw rhythm' | sed 's/^/ /'
 
 echo
 echo "=== timeline (1 s buckets by frame arrival) ==="

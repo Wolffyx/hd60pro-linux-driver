@@ -428,6 +428,8 @@ static bool mz0380_raw_deliver_slot(struct mz0380_dev *dev, u32 idx)
 	dev->raw_frames_delivered++;
 	if (neutral)
 		dev->raw_chroma_neutral++;
+	mz0380_cadence_note(dev, dev->cadence_take,
+			    &dev->cadence_take_prev_ns, timestamp);
 	vb2_buffer_done(&vbuf->vb.vb2_buf, VB2_BUF_STATE_DONE);
 	return true;
 }
@@ -478,6 +480,7 @@ static void mz0380_drain_raw_deliver(struct mz0380_dev *dev)
 	for (i = 0; i < MZ0380_STREAM_NR_BUFS; i++)
 		if (mz0380_raw_slot_ready(dev, i))
 			ready |= BIT(i);
+	dev->cadence_ready[hweight8(ready)]++;
 
 	if (!ready) {
 		dev->raw_stub_completions++;
@@ -525,6 +528,7 @@ static void mz0380_dma_drain_video(struct mz0380_dev *dev)
 {
 	struct mz0380_frame_event snapshot;
 	unsigned long event_flags, flags;
+	unsigned int batch = 0;
 	bool handled = false;
 
 	/*
@@ -541,6 +545,7 @@ static void mz0380_dma_drain_video(struct mz0380_dev *dev)
 		 */
 		while (mz0380_frame_event_pop(dev, &snapshot)) {
 			handled = true;
+			batch++;
 			mz0380_drain_frame_snapshot(dev, &snapshot);
 		}
 
@@ -567,6 +572,8 @@ static void mz0380_dma_drain_video(struct mz0380_dev *dev)
 		dev->frame_event_drain_scheduled = false;
 		if (handled)
 			mz0380_enc_stat_ack(dev);
+		if (batch)
+			dev->cadence_batch[min(batch, 3u) - 1]++;
 		spin_unlock(&dev->frame_event_lock);
 		spin_unlock_irqrestore(&dev->event_lock, event_flags);
 		return;

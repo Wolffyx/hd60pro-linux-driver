@@ -764,6 +764,9 @@ void mz0380_handle_event_snapshot(struct mz0380_dev *dev, u32 event)
 	} else {
 		dev->frame_events[dev->frame_event_head] = snapshot;
 		dev->frame_event_head = next;
+		mz0380_cadence_note(dev, dev->cadence_event,
+				    &dev->cadence_event_prev_ns,
+				    snapshot.timestamp_ns);
 		if (!dev->frame_event_drain_scheduled) {
 			dev->frame_event_drain_scheduled = true;
 			/*
@@ -815,6 +818,12 @@ void mz0380_frame_events_start(struct mz0380_dev *dev)
 	dev->raw_incomplete_tail = 0;
 	dev->raw_incomplete_chroma = 0;
 	dev->raw_chroma_neutral = 0;
+	dev->cadence_event_prev_ns = 0;
+	dev->cadence_take_prev_ns = 0;
+	memset(dev->cadence_event, 0, sizeof(dev->cadence_event));
+	memset(dev->cadence_take, 0, sizeof(dev->cadence_take));
+	memset(dev->cadence_ready, 0, sizeof(dev->cadence_ready));
+	memset(dev->cadence_batch, 0, sizeof(dev->cadence_batch));
 	/* M246: the audio counters are per session too. */
 	dev->audio_fifo_head = 0;
 	dev->audio_fifo_tail = 0;

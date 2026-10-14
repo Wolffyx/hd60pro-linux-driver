@@ -15772,3 +15772,42 @@ frame a period early, not a duplicate - the delivery clock, not the pipe
 (a pipe can only delay). Next: the driver's own vb2 timestamps (`v4l2-ctl -v`
 with the frames to a file, not stdout) to see whether the cadence is in the
 completion events or in the slot scan.
+
+## M251 (static, 2026-10-14): the 8-frame delivery rhythm - a counter that decides where it comes from
+
+M250's arrival data, re-read frame by frame: the frame that arrives ~1 ms after
+its predecessor is **always index 7 mod 8** (225 of 1800 at 60 fps; the same
+period at 30 fps), and at every content switch in the GPU run the sequence
+moves forward only - no early frame shows older content than the one before
+it. So it is not a stale slot from the previous round of four. With the camera
+no frame was ever a repeat, so it is a new frame, delivered right behind its
+predecessor, followed by a two-period gap.
+
+How delivery works: every card video event is snapshotted in the IRQ
+(`mz0380_handle_event_snapshot`), queued, and the drain worker handles every
+queued event in one run; each event scans the four raw slots and takes at most
+one ready slot, round-robin (M223). Two causes fit the arrival data, and they
+need different fixes:
+
+- **A - the card's events already have the rhythm** (one event in eight fires
+  right behind its predecessor). The driver can only follow; the fix is the
+  vb2 timestamp (stamp from the event/frame clock rather than take time) so a
+  player that paces by timestamp shows it smoothly.
+- **B - the events are even and the delivery is not**: a one-frame backlog
+  (two slots ready at most scans, one taken per event) drained by a batched or
+  extra scan every eighth event. Fix in the drain.
+
+Counter added (`/proc/mz0380-state`, `raw rhythm`, reset per capture): spacing
+histograms in frame periods (<.25 / .5 / 1 / 1.5 / 2 / >2.25) of the card's
+video events (IRQ time) and of the raw frames taken (the vb2 timestamp), slots
+ready per scan (0-4), and events handled per drain run (1/2/3+). The verify and
+black-test scripts print it, with the existing `raw repeats` line (completions
+with >1 slot ready), which the M250 runs did not print.
+
+Predictions, written before any run (any raw capture of >= 600 frames):
+- **A:** card events ~1/8 in `<.25` and ~1/8 in `2`; frames taken the same;
+  slots ready per scan almost always 1; events per drain mostly 1 (a 2 if the
+  close pair is batched).
+- **B:** card events almost all in `1`; frames taken show ~1/8 in `<.25` and
+  ~1/8 in `2`; slots ready per scan mostly 2; events per drain with ~1/8 at 2.
+- Either way, frames taken `<.25` ~ 12% (1/8) of the total, as measured.

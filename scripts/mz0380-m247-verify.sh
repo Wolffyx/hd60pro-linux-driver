@@ -175,7 +175,7 @@ trace_run() {	# trace_run <label> <module>
 	fi
 	echo "  capture 1: $(capture YU12 "$OUT/$1-1.yuv")"
 	echo "  capture 2: $(capture YU12 "$OUT/$1-2.yuv")"
-	state 'enc spawns|pipeline|raw frames|raw fills' | sed 's/^/ /'
+	state 'enc spawns|pipeline|raw frames|raw fills|raw repeats|raw rhythm' | sed 's/^/ /'
 	trace_stop "$1"
 }
 

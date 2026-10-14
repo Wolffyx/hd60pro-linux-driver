@@ -183,6 +183,26 @@ static u64 mz0380_raw_frame_period_ns(struct mz0380_dev *dev)
 }
 
 /*
+ * M251: count the spacing since the previous moment in @hist, in frame
+ * periods: <.25, ~.5, ~1, ~1.5, ~2, >2.25. One frame in eight arrives right
+ * behind its predecessor and the next two periods later (M250); whether the
+ * card's events already do that, or only the delivery does, is the question.
+ */
+void mz0380_cadence_note(struct mz0380_dev *dev, u32 *hist, u64 *prev,
+			 u64 now)
+{
+	u64 quarters;
+
+	if (*prev && now > *prev) {
+		quarters = div64_u64((now - *prev) * 4,
+				     mz0380_raw_frame_period_ns(dev));
+		hist[min_t(u64, (quarters + 1) / 2,
+			   MZ0380_CADENCE_BUCKETS - 1)]++;
+	}
+	*prev = now;
+}
+
+/*
  * M238/M247: have the CHROMA planes been written too?
  *
  * I420 is Y, then U, then V, and the card fills ascending, so luma finishing

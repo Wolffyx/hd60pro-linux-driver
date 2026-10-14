@@ -75,6 +75,8 @@
  */
 #define MZ0380_RAW_FILL_SAMPLES		32
 #define MZ0380_RAW_FILL_ROWS		64
+/* M251: <.25, ~.5, ~1, ~1.5, ~2 and >2.25 frame periods */
+#define MZ0380_CADENCE_BUCKETS		6
 
 #define MZ0380_FRAME_EVENT_FIFO_SIZE	64
 #define MZ0380_H264_PARAMETER_SETS_MAX	4096
@@ -236,6 +238,17 @@ struct mz0380_dev {
 	u64 raw_chroma_probes;
 	u64 raw_chroma_neutral;
 	u32 raw_chroma_max_clear;
+	/*
+	 * M251: the delivery rhythm, as histograms of spacing in frame periods
+	 * (mz0380_cadence_note): the card's video events, the raw frames taken,
+	 * slots ready per scan, and events handled per drain run.
+	 */
+	u64 cadence_event_prev_ns;
+	u64 cadence_take_prev_ns;
+	u32 cadence_event[MZ0380_CADENCE_BUCKETS];
+	u32 cadence_take[MZ0380_CADENCE_BUCKETS];
+	u32 cadence_ready[MZ0380_STREAM_NR_BUFS + 1];
+	u32 cadence_batch[3];
 
 	/* H.264 delivery */
 	u8 h264_last_token;
