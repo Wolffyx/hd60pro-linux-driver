@@ -10,6 +10,7 @@
 #   sudo scripts/mz0380-m247-verify.sh            # needs a 1080p HDMI source
 #   sudo PAUSE=10 scripts/mz0380-m247-verify.sh   # no prompts, fixed waits
 #   sudo scripts/mz0380-m247-verify.sh fourcc     # YUYV check only, module loaded
+#   sudo scripts/mz0380-m247-verify.sh coldtrace  # cold bring-up trace, no power cycle, 0 spawns
 #
 # Phase 1  the card is told the same thing.
 #   The SAME capture scenario runs on this tree and on the baseline module
@@ -32,6 +33,8 @@ BASELINE=${BASELINE:-ko/baseline/mz0380.ko}
 PAUSE=${PAUSE:-}
 FRAMES=${FRAMES:-150}
 mkdir -p "$OUT"
+FOLLOW=
+trap '[ -n "$FOLLOW" ] && kill $FOLLOW 2>/dev/null' EXIT
 
 announce() { printf '%s\n' "$*" > /dev/tty 2>/dev/null || printf '%s\n' "$*" >&2; }
 wait_user() {
@@ -56,7 +59,7 @@ node() {
 state() { grep -E "^  ($1)" /proc/mz0380-state 2>/dev/null; }
 counter() { state "$1" | grep -oE "[0-9]+ $2" | grep -oE '^[0-9]+'; }
 capture() {	# capture <fourcc> <file>
-	v4l2-ctl -d "$(node)" --set-fmt-video=width=1920,height=1080,pixelformat="$1" \
+	timeout 120 v4l2-ctl -d "$(node)" --set-fmt-video=width=1920,height=1080,pixelformat="$1" \
 		--stream-mmap=4 --stream-count="$FRAMES" --stream-to="$2" 2>&1 | tail -1
 }
 # Seconds (wall clock) until QUERY_DV_TIMINGS reports a source. A query can
@@ -67,7 +70,7 @@ wait_lock() {	# wait_lock <max seconds>
 	t0=$(date +%s%3N)
 	while :; do
 		ms=$(( $(date +%s%3N) - t0 ))
-		if v4l2-ctl -d "$n" --query-dv-timings 2>/dev/null | grep -q "Active width"; then
+		if timeout 10 v4l2-ctl -d "$n" --query-dv-timings 2>/dev/null | grep -q "Active width"; then
 			printf '%d.%d\n' $((ms / 1000)) $((ms % 1000 / 100))
 			return 0
 		fi
@@ -76,7 +79,7 @@ wait_lock() {	# wait_lock <max seconds>
 	done
 }
 compliance() {	# compliance <log>
-	v4l2-compliance -d "$(node)" > "$1" 2>&1
+	timeout 300 v4l2-compliance -d "$(node)" > "$1" 2>&1
 	grep -E "^Total|fail:" "$1" | sed 's/^/  /'
 	grep -qE "^Total.*Failed: 0," "$1" || echo "  !! v4l2-compliance failures - see $1"
 }
@@ -119,37 +122,110 @@ if before[2] != yu12 or tried[2] != yu12 or set_to[2] != yu12 or after[:3] != be
 EOF
 }
 
-# One load, two captures (the second is a reattachment), unload. The log is
-# followed live: a mailbox trace overruns the 128 KiB ring before unload.
-trace_run() {	# trace_run <label> <module>
-	local label=$1 ko=$2 follow t
-	echo "=== phase 1 [$label]: $ko ==="
+# The card answered its handshake, or the run is over: a deaf mailbox (M149,
+# the wedge's second form - CMD_INIT -110 on the first load) refuses every
+# capture, and nothing after this point would mean anything.
+card_alive() {	# both this tree and the baseline log it; live.sh cleared the log at load
+	dmesg | grep -q -E "card handshake failed|CMD_INIT got no answer" || return 0
+	dmesg | grep -E "CMD_INIT got no answer" | tail -1 | sed 's/^/  /'
+	echo "  !! card handshake failed (CMD_INIT -110): the card's mailbox is deaf."
+	echo "     Wedged, or never power-cycled: switch the PSU off at the back (or"
+	echo "     unplug it), wait 30 s, boot, and run this again. Nothing else recovers it."
+	./mz0380-live.sh unload > /dev/null 2>&1
+	exit 1
+}
+
+# A traced load: the log is followed live, because a mailbox trace overruns
+# the 128 KiB ring before unload. trace_stop unloads and extracts the trace.
+trace_load() {	# trace_load <label> <module>
 	scripts/mz0380-node-holders.sh 2>/dev/null | grep -v "^no mz0380 node" | tail -2
 	dmesg -C
-	dmesg -w > "$OUT/$label-dmesg.log" 2>/dev/null &
-	follow=$!
-	KO="$ko" TRACE=1 SKIPSMOKE=1 ./mz0380-live.sh load > "$OUT/$label-load.log" 2>&1 ||
-		{ kill $follow; echo "load failed - see $OUT/$label-load.log"; exit 1; }
+	dmesg -w > "$OUT/$1-dmesg.log" 2>/dev/null &
+	FOLLOW=$!
+	KO="$2" TRACE=1 SKIPSMOKE=1 ./mz0380-live.sh load > "$OUT/$1-load.log" 2>&1 ||
+		{ echo "load failed - see $OUT/$1-load.log"; exit 1; }
+	card_alive
+}
+trace_stop() {	# trace_stop <label>
+	./mz0380-live.sh unload > /dev/null 2>&1
+	sleep 1
+	kill $FOLLOW 2>/dev/null; wait $FOLLOW 2>/dev/null; FOLLOW=
+	grep -o 'mbx op=.*' "$OUT/$1-dmesg.log" > "$OUT/$1.trace"
+	# ret/status vary run to run (and with them nothing the card was told).
+	sed -E 's/ ret=-?[0-9]+ status=[0-9a-f]+//' "$OUT/$1.trace" > "$OUT/$1.norm"
+	echo "  $(wc -l < "$OUT/$1.trace") mailbox commands traced"
+	[ -s "$OUT/$1.trace" ] || echo "  !! nothing traced - see $OUT/$1-dmesg.log"
+}
+trace_diff() {	# trace_diff <baseline label> <m247 label>
+	diff "$OUT/$1.norm" "$OUT/$2.norm" > "$OUT/$2.diff"
+	echo "  $(grep -c '^<' "$OUT/$2.diff") commands only in baseline, $(grep -c '^>' "$OUT/$2.diff") only in m247 (full diff: $OUT/$2.diff)"
+	echo "  opcodes only in baseline: $(grep '^<' "$OUT/$2.diff" | grep -o 'op=0x..' | sort | uniq -c | tr -s ' \n' ' ')"
+	echo "  opcodes only in m247    : $(grep '^>' "$OUT/$2.diff" | grep -o 'op=0x..' | sort | uniq -c | tr -s ' \n' ' ')"
+}
+
+# One load, two captures (the second is a reattachment), unload.
+trace_run() {	# trace_run <label> <module>
+	local t
+	echo "=== phase 1 [$1]: $2 ==="
+	trace_load "$1" "$2"
 	if t=$(wait_lock 30); then
 		echo "  source locked ${t}s after load"
 	else
 		echo "  !! no source within 30s of load"
 	fi
-	echo "  capture 1: $(capture YU12 "$OUT/$label-1.yuv")"
-	echo "  capture 2: $(capture YU12 "$OUT/$label-2.yuv")"
+	echo "  capture 1: $(capture YU12 "$OUT/$1-1.yuv")"
+	echo "  capture 2: $(capture YU12 "$OUT/$1-2.yuv")"
 	state 'enc spawns|pipeline|raw frames|raw fills' | sed 's/^/ /'
-	./mz0380-live.sh unload > /dev/null 2>&1
-	sleep 1
-	kill $follow 2>/dev/null; wait $follow 2>/dev/null
-	grep -o 'mbx op=.*' "$OUT/$label-dmesg.log" > "$OUT/$label.trace"
-	echo "  $(wc -l < "$OUT/$label.trace") mailbox commands traced"
-	[ -s "$OUT/$label.trace" ] || echo "  !! nothing traced - see $OUT/$label-dmesg.log"
+	trace_stop "$1"
 }
 
 # `fourcc`: just the unsupported-pixelformat check on the loaded module.
 if [ "${1:-}" = fourcc ]; then
 	N=$(node) || { echo "no HD60 Pro node - load the module first"; exit 1; }
 	fourcc_check "$N" YUYV
+	exit 0
+fi
+
+# `coldtrace`: this tree's cold bring-up next to the baseline's, without a
+# power cycle and with zero spawns (loads only, nothing streams). A reload
+# keeps the receiver (M248), so the baseline's raw mailbox passthrough breaks
+# the bring-up signature first: BANK0 0xad 0x05 -> 0x04 (the low-pass filter,
+# which the cold path writes back). The source sees two hot-plug drops.
+if [ "${1:-}" = coldtrace ]; then
+	[ -f "$BASELINE" ] || { echo "no baseline module at $BASELINE"; exit 1; }
+	make >/dev/null || { echo "build failed"; exit 1; }
+	./mz0380-live.sh unload > /dev/null 2>&1
+	echo "=== baseline cold bring-up: $BASELINE ==="
+	trace_load cold-baseline "$BASELINE"
+	sleep 2
+	echo "0x1b 0x9c 0x00 0x00" > /proc/mz0380-cmd	# BANK0
+	echo "0x1b 0x9c 0xad 0x04" > /proc/mz0380-cmd	# signature broken
+	trace_stop cold-baseline
+	echo "=== this tree, forced cold: ./mz0380.ko ==="
+	trace_load cold-m247 ./mz0380.ko
+	sleep 2
+	trace_stop cold-m247
+	if grep -q "HDMI receiver kept" "$OUT/cold-m247-dmesg.log"; then
+		echo "  !! the receiver was kept - the signature write did not land"
+	fi
+	grep -q "mbx op=0x15" "$OUT/cold-m247.trace" ||
+		echo "  !! no GPIO writes in this tree's trace - it did not reset the receiver"
+	echo
+	echo "=== cold bring-up diff (baseline -> m247) ==="
+	# Leave our two writes out of the baseline's side. 0xad=0x04 is unique -
+	# bring-up writes 0x05 - and the bank select is the line before it.
+	L=$(grep -n 'op=0x1b .*args\[3\]=9c 00 00 00 ad 00 00 00 04 00 00 00' \
+		"$OUT/cold-baseline.norm" | head -1 | cut -d: -f1)
+	if [ -n "$L" ] && [ "$L" -gt 1 ]; then
+		sed -i "$((L - 1)),${L}d" "$OUT/cold-baseline.norm"
+		echo "  (the 2 signature-breaking writes cut from the baseline trace)"
+	else
+		echo "  (the signature-breaking writes are not in the baseline trace - nothing cut)"
+	fi
+	trace_diff cold-baseline cold-m247
+	echo "  expected: baseline-only = its dir_invert=0 reset pass and read-backs;"
+	echo "            m247-only = one bank select + the 0xad signature read"
+	echo "artefacts in $OUT - cold-*.trace, cold-m247.diff"
 	exit 0
 fi
 
@@ -163,21 +239,14 @@ scripts/mz0380-spawns.sh 2>/dev/null | tail -3
 trace_run m247 ./mz0380.ko
 trace_run baseline "$BASELINE"
 
-# ret/status vary run to run (and with them nothing the card was told).
-for t in baseline m247; do
-	sed -E 's/ ret=-?[0-9]+ status=[0-9a-f]+//' "$OUT/$t.trace" > "$OUT/$t.norm"
-done
 echo
 echo "=== phase 1 result: mailbox command diff (baseline -> m247) ==="
-diff "$OUT/baseline.norm" "$OUT/m247.norm" > "$OUT/trace.diff"
-echo "  $(grep -c '^<' "$OUT/trace.diff") commands only in baseline, $(grep -c '^>' "$OUT/trace.diff") only in m247 (full diff: $OUT/trace.diff)"
-echo "  opcodes only in baseline: $(grep '^<' "$OUT/trace.diff" | grep -o 'op=0x..' | sort | uniq -c | tr -s ' \n' ' ')"
-echo "  opcodes only in m247    : $(grep '^>' "$OUT/trace.diff" | grep -o 'op=0x..' | sort | uniq -c | tr -s ' \n' ' ')"
+trace_diff baseline m247
 for op in 0x29 0x2d 0x31 0x02 0x08 0x04 0x2a 0x06 0x07; do
 	a=$(grep -c "op=$op" "$OUT/baseline.norm"); b=$(grep -c "op=$op" "$OUT/m247.norm")
-	[ "$a" = "$b" ] || echo "  !! op $op count differs: baseline $a, m247 $b - check $OUT/trace.diff"
+	[ "$a" = "$b" ] || echo "  !! op $op count differs: baseline $a, m247 $b - check $OUT/m247.diff"
 	diff <(grep "op=$op" "$OUT/baseline.norm") <(grep "op=$op" "$OUT/m247.norm") > /dev/null ||
-		echo "  !! op $op arguments differ - check $OUT/trace.diff"
+		echo "  !! op $op arguments differ - check $OUT/m247.diff"
 done
 
 echo
@@ -186,7 +255,8 @@ announce "# watch the camera during this load: it should stay in HDMI output"
 dmesg -C
 dmesg -w > "$OUT/ux-dmesg.log" 2>/dev/null &
 FOLLOW=$!
-./mz0380-live.sh load > "$OUT/ux-load.log" 2>&1 || { kill $FOLLOW; echo "load failed"; exit 1; }
+./mz0380-live.sh load > "$OUT/ux-load.log" 2>&1 || { echo "load failed"; exit 1; }
+card_alive
 sleep 0.5
 LOADS=$(grep -c "CMD_INIT answered" "$OUT/ux-dmesg.log")
 KEPT=$(grep -c "HDMI receiver kept from the previous load" "$OUT/ux-dmesg.log")
@@ -206,7 +276,7 @@ compliance "$OUT/compliance-signal.log"
 echo "--- unsupported pixelformat keeps the format ---"
 fourcc_check "$N" YUYV
 echo "--- log-status ---"
-v4l2-ctl -d "$N" --log-status > /dev/null 2>&1
+timeout 10 v4l2-ctl -d "$N" --log-status > /dev/null 2>&1
 dmesg | grep -A8 "START STATUS" | tail -9
 
 echo "--- NO SIGNAL on a raw node (one spawn: the first capture starts the encoder) ---"
@@ -248,7 +318,7 @@ fi
 
 ./mz0380-live.sh unload > /dev/null 2>&1
 sleep 1
-kill $FOLLOW 2>/dev/null; wait $FOLLOW 2>/dev/null
+kill $FOLLOW 2>/dev/null; wait $FOLLOW 2>/dev/null; FOLLOW=
 scripts/mz0380-spawns.sh 2>/dev/null | tail -2
 echo
-echo "artefacts in $OUT - send trace.diff, compliance-*.log and *-dmesg.log"
+echo "artefacts in $OUT - send m247.diff, compliance-*.log and *-dmesg.log"

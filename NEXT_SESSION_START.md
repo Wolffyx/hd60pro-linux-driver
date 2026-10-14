@@ -1,9 +1,23 @@
 # NEXT SESSION START
 
-_Last updated 2026-10-12. Full history in **RE_FINDINGS.md** (M1-M248); this
+_Last updated 2026-10-14. Full history in **RE_FINDINGS.md** (M1-M249); this
 file is the handoff only._
 
-## State (2026-10-12): M247 cleanup + M248 fixes, verified and committed
+## State (2026-10-14): M247 + M248 fully verified on hardware, kernel 7.2.9-2
+
+**NEVER PCI-reset the card** (`reset`, `reset_method`, D3hot, remove/rescan):
+it sits behind the X570 chipset, and a PM reset of the wedged card took the
+whole chipset - storage, NICs, USB - and the host down (M249). Recovery from a
+wedge is removing power only (PSU switch or mains, 30 s). A power-down that
+leaves standby power on does not clear it: the card was still deaf after one.
+
+Verify run 4 (fresh power cycle, now 3 spawns) passed with no `!!`: this
+tree's COLD bring-up traced against HEAD's - every difference an intended M247
+removal or source-timing-dependent polling; the receiver kept on reload;
+compliance 48/48 with and without a source; YUYV keeps YU12; NO SIGNAL across
+an unplug with no spawn. The verify script now stops at once on a deaf card.
+
+## Before that (2026-10-12): M247 cleanup + M248 fixes
 
 Video works (1920x1080 raw `YU12`/`NV12`/`YV12` and `H264`, 50-60 fps,
 v4l2-compliance clean as of M245/M244). HDMI audio transport proven (M246),
@@ -40,31 +54,21 @@ next capture.
 
 ## Next, in order
 
-1. **At the next cold boot, `sudo scripts/mz0380-m247-verify.sh`** once more
-   for the cold bring-up trace (3 spawns; prompts for unplug/replug twice).
-   Pass = no `!!` lines. (`... verify.sh fourcc` alone: the zero-spawn YUYV
-   check on a loaded module.) Commit and PR text: no Claude attribution.
-   Predictions, written before the run:
-   - Phase 1: both traces non-empty (bring-up included - this tree goes first,
-     so both loads reset the receiver); identical SET_VIC/SET_ENC/SET_PREVIEW/
-     SET_BUF/SET_AIC/START/STOP; the rest of the diff is receiver traffic.
-   - Phase 2: `receiver kept at 2 of 2 loads`; the source locks in under 2 s
-     (it took 3-7 s when each load reset the receiver); the camera visibly
-     stays in HDMI output through the load.
-   - v4l2-compliance `Failed: 0` both with the source and with it unplugged.
-   - YUYV TRY_FMT answers YU12; unplug during raw capture raises
-     `raw NO SIGNAL frames`, replug ends it with no new spawn.
-   If a trace differs, the diff names the command.
-2. **M247 chroma rule, one more measurement:** show a black screen from the
+Any hardware run: OBS closed (it grabs the node at load and spends spawns).
+`sudo scripts/mz0380-m247-verify.sh` is the regression check (3 spawns;
+`fourcc` and `coldtrace` modes are zero-spawn). No Claude attribution in
+commit or PR text.
+
+1. **M247 chroma rule, one more measurement:** show a black screen from the
    source during a raw capture. Before M247 raw froze on the last frame before
    the fade (prediction); now `colourless frames passed on a second look`
    should climb and the picture should follow the source.
-3. **M246 audio with a source that has sound** (`sudo
+2. **M246 audio with a source that has sound** (`sudo
    scripts/mz0380-m246-audio-test.sh`): channel order and byte order are the
    only open questions.
-4. **Suspend/resume and `.shutdown`** (M245, still untested). M247 fixed one
+3. **Suspend/resume and `.shutdown`** (M245, still untested). M247 fixed one
    resume defect statically: SET_AIC is re-sent after a card cold boot.
-5. **M232** (encoder goes silent) - not reproduced; suspect two consumers.
+4. **M232** (encoder goes silent) - not reproduced; suspect two consumers.
    `scripts/mz0380-node-holders.sh` names them.
 
 ## Running it
@@ -91,6 +95,9 @@ different mode. Reattach, unplug/replug of the same mode, and switching between
 YU12/NV12/YV12 are free. `ffplay` is the cheap consumer; OBS retry loops are not.
 
 ## Retracted or refuted - read before re-proposing any of them
+
+- **M157 PCI-reset recovery** (pm / bus / remove+rescan on a wedged card):
+  the first stage hung the X570 chipset and crashed the host (M249). Closed.
 
 - **M228** deferral: a slot the card cleared stays "landed" forever, so a
   second observation by itself proves nothing. (M247's chroma second look is

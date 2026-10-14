@@ -15628,3 +15628,77 @@ S_FMT -> YU12`, format YU12 1920x1080 before and after, spawns unchanged.
 first and restores the original format afterwards, so whatever an application
 left behind cannot make it pass; a mock of the pre-M247 driver starting from
 H.264 is flagged.
+
+## M249 (2026-10-14): a deaf card on the first load, and a PCI reset that took the host down - NEVER PCI-reset this card
+
+**The deaf card.** After the M248 commit the machine was powered down and
+booted on a new kernel package (`7.2.9-2-cachyos`; every working session ran
+`7.2.0`/`7.2.9-1`). The first load of the boot - the verify script's, before any
+capture - got `CMD_INIT got no answer after 22 attempts/15468ms (-110)` with
+`bar5[30]=fc200004 bar5[38]=fc20005f`: byte for byte the M149 deaf-mailbox
+signature. The previous power cycle had ended at 7 spawns with OBS's H.264
+encoder still running. Two explanations remain and are not yet separated: the
+wedge survived a power-down that did not remove slot standby power (M120), or
+the card does not answer under `7.2.9-2`. Every load on `7.2.9-2` so far has
+been deaf; none has answered.
+
+**The verify script hung on it.** It never checked the handshake: capture 1 was
+refused (`cannot stream: card handshake failed`), capture 2 stalled, the run was
+killed and left its `dmesg -w` follower behind. Fixed: after every load the
+script greps the kernel log for `card handshake failed` / `CMD_INIT got no
+answer` (both this tree and the baseline print them), stops with `!!` and the
+recovery advice; every v4l2-ctl / v4l2-compliance call has a `timeout`; the
+follower is killed on any exit.
+
+**The PCI-reset recovery crashed the host.** M157's plan - "walk pm reset ->
+bus reset -> remove+rescan while wedged, worth exactly one run" - was revived
+as `mz0380-card-recovery.sh`. It checked that the card was alone behind its
+bridge (it is: `03:01.0`) and in its IOMMU group (24). It did not see that
+`03:01.0` is a downstream port of the **X570 chipset**, whose single uplink
+(`00:01.2` -> `02:00.0`) also carries the Samsung NVMe (`05`), Wi-Fi (`06`),
+RTL8125 (`07`), I211 (`08`), chipset USB (`09`) and both SATA controllers
+(`0a`, `0b`). Stage 1, the PM reset (D0 -> D3hot -> D0 on `04:00.0`), at
+~2433 s:
+
+    2436  xhci_hcd 0000:09:00.1: xHCI host controller not responding, assume dead
+    2438  igb 0000:08:00.0 enp8s0: PCIe link lost
+    2440  ata3: failed to resume link (SControl FFFFFFFF)
+    2451  r8169 0000:07:00.0 enp7s0: NETDEV WATCHDOG: transmit queue 0 timed out
+
+with GPU fence timeouts alongside - the whole chipset fell off the bus and the
+system stalled. Root btrfs (on the CPU-attached NVMe) replayed its tree-log on
+the next boot, no errors. The bus-reset and remove+rescan stages never ran.
+
+So: **a wedged MZ0380 must not be PCI-reset on this board** - not by `reset`,
+`reset_method`, setpci power states, or remove/rescan - and a driver must never
+try it either. Whether it is the D3hot transition of a card whose firmware is
+gone, or something the chipset port does with it, the cost is the host. The
+script is deleted; the M157 plan is closed. Recovery stays what it was: remove
+power (PSU switch or mains, wait 30 s).
+
+### M249 resolved: it was the wedge, not the kernel - and the cold bring-up is traced
+
+After the crash the machine was off for 17 minutes. The next verify run, still
+on `7.2.9-2`, passed with no `!!` lines - so the kernel is cleared, and the deaf
+card of the earlier boot was the previous power cycle's wedge surviving a
+power-down that did not clear it. (Spawns before that run: 0; after: 3.)
+
+**Phase 1, cold against cold.** This tree's load had no `kept` line and traced
+290 commands (its full bring-up) against the baseline's 457. Encoder commands
+identical in count and arguments. The 168 baseline-only lines, all accounted:
+- GPIO: HEAD's first reset pass with the wrong GPIO_DIR sense (DIR on pins
+  1/3/8/9, pin3=1, pin9 1->0->1, pin8=0) and its two HPD read-backs (`0x14`) -
+  M247 removals.
+- I2C: 41 bank selects; two extra output-stage commits (`ab=95/15 b0=21 b2=00`,
+  BANK2 `07=14/04` latch) - M247 stopped re-committing an unchanged mode; and
+  `e2=80/00` (AUTO_POSITION) with `0x55` polls - HEAD measured an unlocked
+  receiver after its own hotplug edge, M247 reads the lock byte and returns.
+  That share depends on how long the camera takes to come back.
+- The one M248-only line is the `0xad` read that finds the signature missing
+  on a powered-up receiver.
+
+**Phase 2:** receiver kept at 2 of 2 loads, lock at the first query after
+load, v4l2-compliance 48/48 with the source and 48/48 without, YUYV keeps YU12
+(from a YU12 start), NO SIGNAL 14 frames while unplugged, 35 by replug, no new
+spawn.
+
