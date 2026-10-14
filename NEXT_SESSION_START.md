@@ -1,6 +1,6 @@
 # NEXT SESSION START
 
-_Last updated 2026-10-14. Full history in **RE_FINDINGS.md** (M1-M249); this
+_Last updated 2026-10-14. Full history in **RE_FINDINGS.md** (M1-M250); this
 file is the handoff only._
 
 ## State (2026-10-14): M247 + M248 fully verified on hardware, kernel 7.2.9-2
@@ -59,10 +59,16 @@ Any hardware run: OBS closed (it grabs the node at load and spends spawns).
 `fourcc` and `coldtrace` modes are zero-spawn). No Claude attribution in
 commit or PR text.
 
-1. **M247 chroma rule, one more measurement:** show a black screen from the
-   source during a raw capture. Before M247 raw froze on the last frame before
-   the fade (prediction); now `colourless frames passed on a second look`
-   should climb and the picture should follow the source.
+1. **M247 chroma rule, needs a DIGITAL black** (M250): the DSLR's black has
+   chroma noise and never reaches the neutral path (best 9/32 exact samples),
+   so run `sudo scripts/mz0380-m247-black-test.sh` (1 spawn) with a laptop or
+   phone over HDMI showing a full-screen black image, or a camera playing
+   back a black photo. Pass: 16/16-neutral frames delivered at the source
+   rate and all counted as `colourless passed`. (Lens-cap black: no freeze,
+   30 fps throughout - already measured.)
+   **New lead, same script's data:** one frame in eight arrives ~0 ms after
+   its predecessor and the next ~66 ms later (average exactly 30 fps). Judder
+   candidate; measure with the driver's vb2 timestamps.
 2. **M246 audio with a source that has sound** (`sudo
    scripts/mz0380-m246-audio-test.sh`): channel order and byte order are the
    only open questions.
@@ -125,6 +131,7 @@ read it before believing the fix.**
 ## Tools
 
 - `scripts/mz0380-m247-verify.sh` - the M247/M248 check above.
+- `scripts/mz0380-m247-black-test.sh` - raw capture through a black screen (M250).
 - `scripts/mz0380-m226-blackframe-scan.py` - reads delivered bytes: blank,
   partial, torn, duplicate frames, luma/chroma ranges. Touches no mailbox.
 - `scripts/mz0380-m230-flicker-watch.sh` - counter watch, prints on change.

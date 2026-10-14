@@ -15702,3 +15702,38 @@ load, v4l2-compliance 48/48 with the source and 48/48 without, YUYV keeps YU12
 (from a YU12 start), NO SIGNAL 14 frames while unplugged, 35 by replug, no new
 spawn.
 
+
+## M250 (hardware, 2026-10-14): a black screen through raw capture - no freeze, but the DSLR's black never reaches the neutral path
+
+`scripts/mz0380-m247-black-test.sh` (new): one 30 s raw capture piped into a
+scanner that records, per frame, its arrival time, mean Y/U/V and how many of
+the driver's own 16 V-plane sample dwords read exactly `0x80808080` - 16/16 is
+what takes the M247 neutral path. Tested offline first against a synthetic
+stream that keeps flowing through an exact-neutral black and one that stops
+(the M238 regime: flagged as a 699 ms gap). One spawn (power cycle total 4).
+
+Hardware, the DSLR going black (lens covered) twice and back:
+
+- **No freeze.** 30 frames in every one of the 30 seconds, 900 delivered,
+  0 dropped, 0 repeated frames; mean Y followed the source (20 on black, 75-136
+  on content).
+- **The black never looked like a cleared slot.** Mean V 128.8 on black; at
+  best 9 of 32 chroma samples read exactly 0x80 (M244's 11/32 again), so no
+  frame was 16/16 and `colourless frames passed` stayed 0; no chroma-clear
+  deferrals either. This camera's black carries sensor noise in chroma, so it
+  could never have frozen M238 - the freeze needs a digitally exact neutral
+  picture. **The M247 path is still not exercised on hardware.** It needs a
+  digital black: a laptop/phone over HDMI showing a full-screen black image,
+  or a camera playing back a black picture.
+
+**New lead - an 8-frame delivery cadence.** Arrival intervals: 674 at ~33 ms,
+and every 8th frame a pair - one at ~0 ms followed by one at ~66 ms (113 and
+112 of them, at frames 6/7, 14/15, ...). The average is exactly 30.003 fps and
+nothing is lost, but one frame in eight arrives a frame early and the next a
+frame late: judder in a player that shows frames as they come. The same
+scanner on a synthetic 30 fps stream gave even ~33-41 ms spacing, so this is
+the driver or the card, not the measurement. Raw delivery runs on the ENCODED
+completion and takes at most one slot per completion (M223); 8 = two passes
+over the four slots. Next: capture with the driver's own vb2 timestamps
+(`v4l2-ctl -v` to a file, not stdout) to see whether the cadence is in the
+completion clock or in the slot scan.
