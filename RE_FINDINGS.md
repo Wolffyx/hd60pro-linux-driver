@@ -15726,6 +15726,13 @@ Hardware, the DSLR going black (lens covered) twice and back:
   digital black: a laptop/phone over HDMI showing a full-screen black image,
   or a camera playing back a black picture.
 
+Run 2, the camera PLAYING BACK a photo taken with the lens cap on: Y 20.1,
+V 128.8, best 10/32 exact samples - statistically the live lens-cap black
+again, because the photo recorded the same sensor noise. Still 30 fps every
+second, 900/900, no repeats, and the 66 ms pair in every second again. A
+camera cannot produce an exact neutral; the source has to be digital (a
+computer or console). Power cycle total 5.
+
 **New lead - an 8-frame delivery cadence.** Arrival intervals: 674 at ~33 ms,
 and every 8th frame a pair - one at ~0 ms followed by one at ~66 ms (113 and
 112 of them, at frames 6/7, 14/15, ...). The average is exactly 30.003 fps and

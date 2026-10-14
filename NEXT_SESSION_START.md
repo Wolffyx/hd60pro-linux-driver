@@ -61,9 +61,9 @@ commit or PR text.
 
 1. **M247 chroma rule, needs a DIGITAL black** (M250): the DSLR's black has
    chroma noise and never reaches the neutral path (best 9/32 exact samples),
-   so run `sudo scripts/mz0380-m247-black-test.sh` (1 spawn) with a laptop or
-   phone over HDMI showing a full-screen black image, or a camera playing
-   back a black photo. Pass: 16/16-neutral frames delivered at the source
+   so run `sudo scripts/mz0380-m247-black-test.sh` (1 spawn) with a COMPUTER
+   or console over HDMI showing a full-screen black image (the camera playing
+   back a lens-cap photo replays the same noise - measured, M250). Pass: 16/16-neutral frames delivered at the source
    rate and all counted as `colourless passed`. (Lens-cap black: no freeze,
    30 fps throughout - already measured.)
    **New lead, same script's data:** one frame in eight arrives ~0 ms after
