@@ -364,6 +364,62 @@ int mz0380_mst3367_refresh_colourspace(struct mz0380_dev *dev)
 	return 0;
 }
 
+/*
+ * M252: RGB -> limited-range YCbCr for the MST3367 CSC, in the format the HD60
+ * Pro Windows driver writes (FUN_14024c894): 15-bit two's complement,
+ * big-endian, 4096 = 1.0, grouped by input R, G, B as [Cr, Y, Cb], then the
+ * Cr, Y and Cb offsets in 1/64 code - BANK0 0x93..0xaa. Generated from the
+ * BT.709/601 constants, luma rows exact at black and white, chroma rows summing
+ * to 0 so every grey lands on 128. The table init writes (hdcapm's) is a
+ * full-swing matrix with a +10 luma offset: RGB black at Y 10, white clipped.
+ */
+static const struct {
+	const char *name;
+	s16 v[12];
+} mst3367_rgb_tables[] = {
+	{ "BT.709 full->limited",
+	  { 1799,  748, -412, -1634, 2516, -1387, -165, 254, 1799, 8192, 1024, 8192 } },
+	{ "BT.709 limited->limited",
+	  { 2095,  871, -480, -1903, 2929, -1615, -192, 296, 2095, 8192,    0, 8192 } },
+	{ "BT.601 full->limited",
+	  { 1799, 1052, -607, -1506, 2065, -1192, -293, 401, 1799, 8192, 1024, 8192 } },
+	{ "BT.601 limited->limited",
+	  { 2095, 1225, -707, -1754, 2404, -1388, -341, 467, 2095, 8192,    0, 8192 } },
+};
+
+/*
+ * The range the source declares in its AVI InfoFrame (Q1:Q0, BANK2 0x4a bits
+ * 3:2) when it declares one. A source that declares none is taken as full
+ * range: M252's GPU declared "default" in every KDE setting and sent full
+ * range under "automatic". BT.601 for SD, as the node's colorspace label says
+ * (M245).
+ */
+static unsigned int mst3367_rgb_table(struct mz0380_dev *dev)
+{
+	unsigned int q = (dev->mst_b2_4a >> 2) & 3;
+	unsigned int h = dev->capture.source_height ?: dev->capture.height;
+
+	return (q == 1 ? 1 : 0) + (h <= 576 ? 2 : 0);
+}
+
+static int mst3367_write_rgb_table(struct mz0380_dev *dev, unsigned int t)
+{
+	const s16 *v = mst3367_rgb_tables[t].v;
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(mst3367_rgb_tables[t].v); i++) {
+		u16 w = (u16)v[i] & 0x7fff;
+
+		ret = mst_wr(dev, 0x93 + 2 * i, w >> 8);
+		if (!ret)
+			ret = mst_wr(dev, 0x94 + 2 * i, w & 0xff);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 void mz0380_mst3367_apply_csc_mode(struct mz0380_dev *dev)
 {
 	static const char * const names[] = {
@@ -412,13 +468,24 @@ void mz0380_mst3367_apply_csc_mode(struct mz0380_dev *dev)
 	cs = (b2_48 & 0x60) >> 5;
 	want = (cs == 1 || cs == 2) ? 0x00 : MST3367_CSC_CTL_HDCAPM;
 
+	/* M252: the matrix first, so the CSC never runs a half-written one. */
+	if (mst_bank(dev, MST3367_BANK0))
+		goto out;
+	if (want) {
+		unsigned int t = mst3367_rgb_table(dev);
+
+		if (mst3367_write_rgb_table(dev, t))
+			goto out;
+		dev->mst_csc_table = mst3367_rgb_tables[t].name;
+	}
 	if (mst_wr(dev, 0x92, want))
 		goto out;
 	dev->mst_csc_applied = want;
 	dev->mst_csc_applied_valid = true;
 	dev_dbg(&dev->pci->dev,
-		"MST3367 CSC 0x92 = 0x%02x (input colorspace %s from 0x48=%02x, %s)\n",
-		want, names[cs], b2_48, cached ? "cached" : "read here");
+		"MST3367 CSC 0x92 = 0x%02x (input colorspace %s from 0x48=%02x, %s; %s)\n",
+		want, names[cs], b2_48, cached ? "cached" : "read here",
+		want ? dev->mst_csc_table : "bypass");
 out:
 	mutex_unlock(&mst3367_lock);
 }

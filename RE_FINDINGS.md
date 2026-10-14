@@ -15864,3 +15864,50 @@ all automatic) and measures black and white separately - and its first capture
 is long enough for the M251 rhythm counter. Predictions with the current
 table: full -> black ~10-11, white 255; limited -> black ~26, white ~244;
 chroma 128 everywhere; 0x4a shows the range KDE selected if amdgpu signals it.
+
+## M253 (hardware + fix, 2026-10-14): M251 resolved - the driver's rhythm is even; M252 confirmed to the code, and the RGB matrix replaced
+
+`scripts/mz0380-m252-range-test.sh`, GPU HDMI looped into the card, one spawn
+(power cycle total 7).
+
+**M251 - the 8-frame rhythm is not in the driver or the card.** 900-frame raw
+capture at 60 fps: card events by spacing `0/0/901/1/0/0` (all but one exactly
+one period), frames taken `0/0/898/1/0/0`, events per drain run 903 x 1 (never
+batched). The vb2 timestamps an application sees are even. M250's 1-in-8 pair
+came from the measurement path - v4l2-ctl writing 3 MB frames into a pipe read
+by a Python scanner: a consumer running one frame behind that periodically
+catches up makes a frame look early. M250's "a pipe can only delay, so it is
+not the pipe" was wrong; retracted. Slots ready per scan were 2 in 623 of 903
+scans - this pattern is all exactly-neutral (black/white), so every slot took
+M247's one-period second look: one frame of extra latency on purely neutral
+content, by design.
+
+**M252 - the decode predicts the hardware exactly.** Black/white halves of an
+mpv pattern, KDE RGB range per phase:
+
+    automatic  black Y 11   white Y 254   Cb = Cr = 128
+    full       black Y 11   white Y 254
+    limited    black Y 26   white Y 244
+
+Predicted 10-11/255 and 26/244. White stops at 254, not the table's 264: the
+BT.1120 bus reserves 0 and 255 for timing codes. The GPU declared **Q = default
+in all three** (`0x4a = 0x80`: IT content, no range), and "automatic" = full.
+
+**Fix:** `mz0380_mst3367_apply_csc_mode` now writes an RGB matrix at stream
+start (and on `/proc/mz0380-hdmi csc`) before enabling the CSC, chosen by the
+declared range - limited -> limited->limited, full or undeclared -> full->limited
+- and by mode (BT.601 for SD, as the node's colorspace label says). Tables
+generated from the BT.709/601 constants (M252 has the bytes; the BT.709
+full->limited one equals candidate A byte for byte; the limited->limited ones
+sum luma to exactly 4096, so 16 -> 16 and 235 -> 235, where Windows' default
+gives 15.99). YCbCr sources keep the bypass. `/proc` names the table. The
+cached path also selects BANK0 before writing now - it never did.
+
+Predictions for the next range-test run (needs a fresh power cycle):
+- automatic / full: black **16** (17 if the source's black is really 1, as
+  the old table's 11 suggests), white **235**, chroma 128; `/proc` says
+  `BT.709 full->limited`.
+- limited: black ~30, white ~218 - WRONG, and expected: the GPU sends limited
+  but declares nothing, so it is taken as full. Unfixable from the receiver;
+  a source that declares limited gets the limited table.
+- YCbCr sources (the DSLR): unchanged - black ~20, chroma noise as before.

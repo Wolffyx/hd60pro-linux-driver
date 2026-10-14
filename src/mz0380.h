@@ -338,6 +338,7 @@ struct mz0380_dev {
 	bool mst_b2_48_valid;
 	u8 mst_csc_applied;
 	bool mst_csc_applied_valid;
+	const char *mst_csc_table;	/* M252: RGB matrix last written */
 	u64 mst_rearms;	/* M233: AUTO_POSITION re-arms on real lock loss */
 	/* M247: the output stage was committed for this mode already. */
 	struct v4l2_dv_timings mst_committed;

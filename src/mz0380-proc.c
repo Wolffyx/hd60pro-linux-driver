@@ -170,8 +170,9 @@ static void mz0380_state_receiver(struct seq_file *m, struct mz0380_dev *dev)
 		seq_puts(m, "  colourspace: not yet read");
 	if (dev->mst_csc_applied_valid)
 		seq_printf(m, ", CSC 0x92=%02x (%s)\n", dev->mst_csc_applied,
-			   dev->mst_csc_applied ? "hdcapm RGB matrix" :
-						  "bypass");
+			   dev->mst_csc_applied ?
+			   (dev->mst_csc_table ?: "hdcapm RGB matrix") :
+			   "bypass");
 	else
 		seq_puts(m, ", CSC never written\n");
 	seq_printf(m, "  rearms     : %llu MST3367 AUTO_POSITION re-arms (only on real lock loss since M233)\n",
