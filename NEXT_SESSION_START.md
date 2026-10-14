@@ -59,16 +59,15 @@ Any hardware run: OBS closed (it grabs the node at load and spends spawns).
 `fourcc` and `coldtrace` modes are zero-spawn). No Claude attribution in
 commit or PR text.
 
-1. **M247 chroma rule, needs a DIGITAL black** (M250): the DSLR's black has
-   chroma noise and never reaches the neutral path (best 9/32 exact samples),
-   so run `sudo scripts/mz0380-m247-black-test.sh` (1 spawn) with a COMPUTER
-   or console over HDMI showing a full-screen black image (the camera playing
-   back a lens-cap photo replays the same noise - measured, M250). Pass: 16/16-neutral frames delivered at the source
-   rate and all counted as `colourless passed`. (Lens-cap black: no freeze,
-   30 fps throughout - already measured.)
-   **New lead, same script's data:** one frame in eight arrives ~0 ms after
-   its predecessor and the next ~66 ms later (average exactly 30 fps). Judder
-   candidate; measure with the driver's vb2 timestamps.
+1. **The 8-frame delivery cadence** (M250): one frame in eight arrives a
+   period early, right behind its predecessor, then a two-period gap - at
+   30 and 60 fps, average exact. Judder candidate. Measure with the driver's
+   vb2 timestamps (`v4l2-ctl -v`, frames to a file) - 1 spawn.
+   Also from M250: RGB black lands at Y = 11 (below 16) - CSC offset or range
+   mismatch for PC/console sources; and a refresh-only source change (60 ->
+   50 Hz) is not noticed while frames flow.
+   (M247's chroma rule is DONE: verified with the GPU's HDMI looped into the
+   card - 219 exactly-neutral frames, all delivered at 60 fps.)
 2. **M246 audio with a source that has sound** (`sudo
    scripts/mz0380-m246-audio-test.sh`): channel order and byte order are the
    only open questions.

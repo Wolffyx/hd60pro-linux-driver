@@ -15733,6 +15733,30 @@ second, 900/900, no repeats, and the 66 ms pair in every second again. A
 camera cannot produce an exact neutral; the source has to be digital (a
 computer or console). Power cycle total 5.
 
+### Run 3: the GPU as a digital source - **M247 holds on hardware**
+
+The RX 6800 XT's free HDMI port looped into the card (KDE sees a third
+screen at 1920x1080@60); black = `mpv --fs av://lavfi:color=c=black`. One
+spawn, power cycle total 6.
+
+- **219 frames had all 16 V samples exactly 0x80, and `colourless frames
+  passed` rose by exactly 219.** 322 chroma-clear deferrals: each neutral
+  slot was held one frame period, then delivered. 60 fps through the whole
+  black, max gap 33 ms, 1800/1800 delivered, 0 dropped. The M238 regime would
+  have delivered none of the 219 - a 4 s freeze on the last desktop frame.
+- The neutral run stops partway into second 12 and Y moves 11.0 -> 11.7:
+  something was drawn on the black (mpv's controls or the pointer), so V was
+  no longer exact and the frames passed on the first look. Correct.
+- **RGB black arrives at Y = 11**, below video black (16), with Cb = Cr =
+  128 exactly. Either the MST3367 CSC carries a luma offset ~5 codes low for
+  RGB input, or the GPU's RGB range (full vs limited) and the CSC disagree.
+  Colour-accuracy lead for PC/console sources; the DSLR (YCbCr) black was 20.
+- At second 25 the source went from 60 to exactly 50 fps (intervals 16.7 ->
+  20.0 ms) - a refresh change on the GPU side. Every frame was still
+  delivered, but the driver did not notice: the monitor leaves a receiver
+  alone while frames flow, so a refresh-only change keeps the old frame
+  interval in G_PARM. Low priority.
+
 **New lead - an 8-frame delivery cadence.** Arrival intervals: 674 at ~33 ms,
 and every 8th frame a pair - one at ~0 ms followed by one at ~66 ms (113 and
 112 of them, at frames 6/7, 14/15, ...). The average is exactly 30.003 fps and
@@ -15741,6 +15765,10 @@ frame late: judder in a player that shows frames as they come. The same
 scanner on a synthetic 30 fps stream gave even ~33-41 ms spacing, so this is
 the driver or the card, not the measurement. Raw delivery runs on the ENCODED
 completion and takes at most one slot per completion (M223); 8 = two passes
-over the four slots. Next: capture with the driver's own vb2 timestamps
-(`v4l2-ctl -v` to a file, not stdout) to see whether the cadence is in the
-completion clock or in the slot scan.
+over the four slots. Run 3 shows it at 60 fps too: intervals repeat
+`1, 32, 17, 17, 17, 17, 17, 17` ms. With the camera every frame was distinct
+(0 repeats), so the frame that arrives 1 ms after its predecessor is a NEW
+frame a period early, not a duplicate - the delivery clock, not the pipe
+(a pipe can only delay). Next: the driver's own vb2 timestamps (`v4l2-ctl -v`
+with the frames to a file, not stdout) to see whether the cadence is in the
+completion events or in the slot scan.
