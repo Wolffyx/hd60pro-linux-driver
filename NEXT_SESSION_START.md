@@ -59,13 +59,10 @@ Any hardware run: OBS closed (it grabs the node at load and spends spawns).
 `fourcc` and `coldtrace` modes are zero-spawn). No Claude attribution in
 commit or PR text.
 
-1. **Verify the M253 RGB matrix** (fresh power cycle, 1 spawn, GPU HDMI looped
-   in, OBS closed): `sudo scripts/mz0380-m252-range-test.sh`. Pass: automatic
-   and full give black 16 (or 17) and white 235, chroma 128, `/proc` names
-   `BT.709 full->limited`. Limited gives ~30/~218 - expected, the GPU does not
-   declare its range. Then a DSLR capture to confirm YCbCr is unchanged.
-   (M251 is closed: the driver and card deliver evenly; the 1-in-8 pattern
-   was the measurement pipe.)
+1. **Fresh power cycle first** - this one ended at 8 spawns. Then a short
+   DSLR raw capture to confirm YCbCr sources are untouched by M253 (black
+   ~20, `/proc` colourspace YUV422 with the CSC bypassed). M253 itself is
+   verified: PC black 17 / white 235 (was 11 / 254).
 2. **M246 audio with a source that has sound** (`sudo
    scripts/mz0380-m246-audio-test.sh`): channel order and byte order are the
    only open questions.

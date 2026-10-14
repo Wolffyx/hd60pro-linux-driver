@@ -15911,3 +15911,16 @@ Predictions for the next range-test run (needs a fresh power cycle):
   but declares nothing, so it is taken as full. Unfixable from the receiver;
   a source that declares limited gets the limited table.
 - YCbCr sources (the DSLR): unchanged - black ~20, chroma noise as before.
+
+### M253 verified on hardware (same power cycle, now 8 spawns)
+
+Range test after the fix: automatic and full -> black **Y 17**, white **235**,
+Cb = Cr = 128, `/proc` reporting `BT.709 full->limited`; limited -> 30 / 218,
+as predicted for a source that sends limited range without declaring it. 17
+rather than 16 is the source: its black is 1, not 0 (1 x 3518/4096 + 16 =
+16.86), which also explains the old table's 11 (1 x 0.9963 + 10.02). With the
+limited readings (old 25.96 -> 26, new 29.74 -> 30) the CSC output rounds to
+nearest, it does not truncate. Rhythm counter again even: card events
+`0/0/902/0/0/0`, frames taken `0/0/899/0/0/0`.
+
+Still to check on a fresh power cycle: a YCbCr source (the DSLR) is unchanged.
