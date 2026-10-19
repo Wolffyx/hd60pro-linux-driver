@@ -1,6 +1,6 @@
 # NEXT SESSION START
 
-_Last updated 2026-10-14. Full history in **RE_FINDINGS.md** (M1-M253); this
+_Last updated 2026-10-19. Full history in **RE_FINDINGS.md** (M1-M254); this
 file is the handoff only._
 
 ## State (2026-10-14): M247 + M248 fully verified on hardware, kernel 7.2.9-2
@@ -59,10 +59,10 @@ Any hardware run: OBS closed (it grabs the node at load and spends spawns).
 `fourcc` and `coldtrace` modes are zero-spawn). No Claude attribution in
 commit or PR text.
 
-1. **Fresh power cycle first** - this one ended at 8 spawns. Then a short
-   DSLR raw capture to confirm YCbCr sources are untouched by M253 (black
-   ~20, `/proc` colourspace YUV422 with the CSC bypassed). M253 itself is
-   verified: PC black 17 / white 235 (was 11 / 254).
+1. **M254 done**: DSLR stays on CSC bypass after M253 (`0x48=b0`, YUV422,
+   `0x92=00`) on kernel 7.2.11. Open side question: the idle `csc` read gave
+   0x48=00 with the source in HDMI mode, and 0x0e read `b0` - check whether
+   the idle read path is shifted before trusting idle 0x48 reads.
 2. **M246 audio with a source that has sound** (`sudo
    scripts/mz0380-m246-audio-test.sh`): channel order and byte order are the
    only open questions.

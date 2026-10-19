@@ -15924,3 +15924,29 @@ nearest, it does not truncate. Rhythm counter again even: card events
 `0/0/902/0/0/0`, frames taken `0/0/899/0/0/0`.
 
 Still to check on a fresh power cycle: a YCbCr source (the DSLR) is unchanged.
+
+## M254 (hardware, 2026-10-19): YCbCr sources untouched by M253 - DSLR stays on CSC bypass
+
+Kernel 7.2.11-1 (upgraded 2026-10-18), module rebuilt for it by
+`mz0380-live.sh load` (loaded srcversion = built `mz0380.ko`). DSLR on HDMI
+output, receiver kept from the previous load (no reset, no hotplug).
+
+The `csc` report now also prints the link and packet state its reading rests
+on (B1 0x01 bit2 = HDMI mode, B2 0x0b/0x0c/0x0e packet status, per M78), so a
+stale 0x48 from a DVI source can be told apart from a real one.
+
+Result, two reads:
+
+- `echo csc > /proc/mz0380-hdmi` (idle, 14:21:38): `0x48=00 0x4a=00 | link B1
+  01=8c (HDMI) | packets B2 0b=7e 0c=00 0e=b0`. Source is in HDMI mode, so the
+  0x00 is not a DVI leftover; it is the known bad idle read of 0x48 (it read
+  0x00 for an RGB-labelled source before, line ~7337). Note 0x0e returned
+  `b0`, the value 0x48 should hold - worth checking whether the idle path is
+  reading a shifted register before trusting any idle 0x48 again.
+- Stream start (OBS, H.264, 14:21:58, spawn 1 of this load): cached
+  `0x48=b0 0x4a=00` -> `source YUV422, RGB range default, CSC 0x92=00
+  (bypass)`. 3016 H.264 frames delivered, 0 dropped.
+
+So the decision M253 changed takes the bypass branch for the camera: YCbCr
+sources are unaffected. Not re-measured: camera black level in a raw capture
+(earlier ~20); the bypass branch's code is unchanged since before M253.

@@ -334,7 +334,7 @@ out:
  */
 int mz0380_mst3367_refresh_colourspace(struct mz0380_dev *dev)
 {
-	u8 b2_48, b2_4a = 0;
+	u8 b2_48, b2_4a = 0, b1_01 = 0, b2_0b = 0, b2_0c = 0, b2_0e = 0;
 	int ret;
 
 	if (dev->fw_state != MZ0380_FW_STATE_READY || !dev->mst3367_ready)
@@ -350,6 +350,16 @@ int mz0380_mst3367_refresh_colourspace(struct mz0380_dev *dev)
 		dev->mst_b2_48 = b2_48;
 		dev->mst_b2_4a = b2_4a;
 		dev->mst_b2_48_valid = true;
+		/*
+		 * M254: with the reading, what it rests on - the AVI bytes are
+		 * only fresh if the source is in HDMI mode and sending packets
+		 * (M78: B1 0x01 bit2 HDMI, B2 0x0b/0x0c/0x0e packet status).
+		 */
+		mst_rd(dev, 0x0b, &b2_0b);
+		mst_rd(dev, 0x0c, &b2_0c);
+		mst_rd(dev, 0x0e, &b2_0e);
+		if (!mst_bank(dev, MST3367_BANK1))
+			mst_rd(dev, 0x01, &b1_01);
 	}
 	mst_bank(dev, MST3367_BANK0);
 	mutex_unlock(&mst3367_lock);
@@ -359,8 +369,10 @@ int mz0380_mst3367_refresh_colourspace(struct mz0380_dev *dev)
 			dev->name, ret);
 		return ret;
 	}
-	pr_info("%s: MST3367 colourspace re-read: 0x48=%02x 0x4a=%02x\n",
-		dev->name, b2_48, b2_4a);
+	pr_info("%s: MST3367 colourspace re-read: 0x48=%02x 0x4a=%02x | link B1 01=%02x (%s) | packets B2 0b=%02x 0c=%02x 0e=%02x\n",
+		dev->name, b2_48, b2_4a, b1_01,
+		(b1_01 & 0x04) ? "HDMI" : "DVI - no InfoFrames, 0x48 is stale",
+		b2_0b, b2_0c, b2_0e);
 	return 0;
 }
 
