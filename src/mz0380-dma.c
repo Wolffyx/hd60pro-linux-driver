@@ -57,6 +57,46 @@ void mz0380_dma_ring_free(struct mz0380_dev *dev, struct mz0380_ring *r)
 
 /* --- streaming buffer set (video channel 0) ------------------------------ */
 
+/* x86 coherent PCI: fragmented host pages, contiguous device-visible IOVA.
+ * Publish b only after every mapping succeeds. On failure, unmap before
+ * releasing any backing memory. This fallback is deliberately x86-only.
+ */
+static int mz0380_fragmented_buf_alloc(struct mz0380_dev *dev,
+		struct mz0380_stream_buf *b, dma_addr_t iova, size_t size)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(&dev->pci->dev);
+	size_t off;
+	void *va;
+	int ret = -ENOMEM;
+
+	if (!IS_ENABLED(CONFIG_X86_64) || !domain)
+		return -EOPNOTSUPP;
+	va = vzalloc(size);
+	if (!va)
+		return -ENOMEM;
+	for (off = 0; off < size; off += PAGE_SIZE) {
+		if (iommu_iova_to_phys(domain, iova + off)) {
+			ret = -EBUSY;
+			goto fail;
+		}
+		ret = iommu_map(domain, iova + off,
+			page_to_phys(vmalloc_to_page((char *)va + off)),
+			PAGE_SIZE, IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
+		if (ret)
+			goto fail;
+	}
+	b->va = va;
+	b->dma = iova;
+	pr_info("%s: fragmented buffer mapped at IOVA 0x%llx (%zu bytes)\n",
+		dev->name, (unsigned long long)iova, size);
+	return 0;
+fail:
+	if (off)
+		iommu_unmap(domain, iova, off);
+	vfree(va);
+	return ret;
+}
+
 void mz0380_stream_bufs_free(struct mz0380_dev *dev)
 {
 	struct iommu_domain *domain = iommu_get_domain_for_dev(&dev->pci->dev);
@@ -70,7 +110,11 @@ void mz0380_stream_bufs_free(struct mz0380_dev *dev)
 		if (!b->va)
 			continue;
 
-		if (b->pages) {
+		if (is_vmalloc_addr(b->va)) {
+			if (b->dma && domain)
+				iommu_unmap(domain, b->dma, MZ0380_STREAM_BUF_SIZE);
+			vfree(b->va);
+		} else if (b->pages) {
 			/* M26 path: our own pages behind an explicit mapping */
 			if (b->dma && domain)
 				iommu_unmap(domain, b->dma,
@@ -97,7 +141,11 @@ void mz0380_h264_bufs_free(struct mz0380_dev *dev)
 
 		if (!b->va)
 			continue;
-		if (b->pages) {
+		if (is_vmalloc_addr(b->va)) {
+			if (b->dma && domain)
+				iommu_unmap(domain, b->dma, MZ0380_H264_BUF_SIZE);
+			vfree(b->va);
+		} else if (b->pages) {
 			if (b->dma && domain)
 				iommu_unmap(domain, b->dma, MZ0380_H264_BUF_SIZE);
 			__free_pages(b->pages, get_order(MZ0380_H264_BUF_SIZE));
@@ -243,10 +291,15 @@ static int mz0380_h264_bufs_alloc_iova(struct mz0380_dev *dev)
 			((u64)(MZ0380_STREAM_NR_BUFS + i) << 32);
 		phys_addr_t phys;
 
-		b->pages = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+		b->pages = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN |
+				       __GFP_NORETRY, order);
 		if (!b->pages) {
-			ret = -ENOMEM;
-			goto err;
+			ret = mz0380_fragmented_buf_alloc(dev, b, iova,
+						 MZ0380_H264_BUF_SIZE);
+			if (ret)
+				goto err;
+			memset(b->va, MZ0380_H264_POISON_BYTE, MZ0380_H264_BUF_SIZE);
+			continue;
 		}
 		b->va = page_address(b->pages);
 		phys = page_to_phys(b->pages);
@@ -439,10 +492,14 @@ static int mz0380_stream_bufs_alloc_iova(struct mz0380_dev *dev)
 				  mz0380_dma_iova_offset;
 		phys_addr_t phys;
 
-		b->pages = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+		b->pages = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN |
+				       __GFP_NORETRY, order);
 		if (!b->pages) {
-			ret = -ENOMEM;
-			goto err;
+			ret = mz0380_fragmented_buf_alloc(dev, b, iova,
+						 MZ0380_STREAM_BUF_SIZE);
+			if (ret)
+				goto err;
+			continue;
 		}
 		b->va = page_address(b->pages);
 		phys = page_to_phys(b->pages);
