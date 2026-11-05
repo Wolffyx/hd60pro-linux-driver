@@ -89,7 +89,19 @@ static int mz0380_start_placeholder_only(struct mz0380_dev *dev, int lock_ret)
 static int mz0380_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
 	struct mz0380_dev *dev = vb2_get_drv_priv(vq);
+	u16 command;
 	int ret;
+
+	/* Diagnostic shutdown may clear bus mastering outside the driver.
+	 * Never spawn an encoder based only on the cached dma_armed flag.
+	 */
+	ret = pci_read_config_word(dev->pci, PCI_COMMAND, &command);
+	if (ret || command == 0xffff || !(command & PCI_COMMAND_MASTER)) {
+		dev_warn(&dev->pci->dev,
+			 "capture refused: PCI bus mastering is disabled or inaccessible\n");
+		ret = -EIO;
+		goto error;
+	}
 
 	if (!dev->dma_armed) {
 		dev_warn(&dev->pci->dev,
