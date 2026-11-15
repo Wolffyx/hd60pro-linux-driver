@@ -236,6 +236,7 @@ tests, loads and inspects the module from the tree, and keeps the spawn tally.
 | `NEXT_SESSION_START.md` | the current state of the work and what is next |
 | `RE_FINDINGS.md` | the reverse-engineering record, milestone by milestone (M1-M247); code comments cite it as `Mnnn` |
 | `docs/history/` | superseded plans and handoffs, kept for their reasoning |
+| `docs/history/pre-m247/` | the diagnostics code and experiment scripts M247 removed from the driver - a record, never built |
 | `scripts/` | hardware tests (`mz0380-m*-*.sh`), the spawn tally, frame analysis, RE tooling |
 
 ```
