@@ -10,12 +10,19 @@
 # up. This test changes the mode under one long capture and watches for that.
 #
 # Needs the GPU's HDMI output looped into the card (KDE output HDMI-A-1), as
-# the M252 range test does; kscreen-doctor switches its refresh rate.
+# the M252 range test does. Each change is made the way a device swap looks to
+# the card: kscreen-doctor turns the output off for three seconds, then on in
+# the other mode. Switching the refresh rate with the link up does NOT work as
+# a test: the receiver keeps its lock, frames keep flowing through the old
+# encoder at the new rate, and the driver never measures the source again -
+# the first M256 run changed 60 -> 30 Hz that way and nothing happened.
 #
 #   sudo scripts/mz0380-m256-mode-follow-test.sh
 #   sudo MODE_B=1920x1080@50 scripts/mz0380-m256-mode-follow-test.sh
+#   sudo REUSE=1 scripts/mz0380-m256-mode-follow-test.sh   # keep the loaded module
 #
-# Budget: THREE encoder spawns - the capture start and two followed changes.
+# Budget: THREE encoder spawns - the capture start and two followed changes
+# (two with REUSE=1 when the loaded module's encoder already runs MODE_A raw).
 # It refuses to start when that would take the power cycle's tally past 8
 # (FORCE=1 overrides).
 #
@@ -69,9 +76,24 @@ node() {
 	grep -l 'HD60 Pro HDMI capture' /sys/class/video4linux/video*/name 2>/dev/null |
 		sed 's|/sys/class/video4linux/|/dev/|; s|/name||' | head -1
 }
-set_mode() {	# set_mode <WxH@R>
-	as_user kscreen-doctor "output.$OUTPUT.mode.$1" > /dev/null 2>&1 ||
+set_mode() {	# set_mode <WxH@R> - output on, in that mode
+	as_user kscreen-doctor "output.$OUTPUT.enable" "output.$OUTPUT.mode.$1" > /dev/null 2>&1 ||
 		bad "kscreen-doctor could not set $OUTPUT to $1"
+}
+swap_to() {	# swap_to <WxH@R> - what unplugging one device and plugging in another looks like
+	as_user kscreen-doctor "output.$OUTPUT.disable" > /dev/null 2>&1 ||
+		bad "kscreen-doctor could not turn $OUTPUT off"
+	sleep 3
+	set_mode "$1"
+}
+# The driver has to see the change before it can follow it.
+wait_noticed() {	# wait_noticed <max seconds>
+	local i
+	for i in $(seq "$1"); do
+		dmesg | grep -q "HDMI source changed to" && return 0
+		sleep 1
+	done
+	return 1
 }
 # Seconds until the raw frame counter has grown by 30 from now, or failure.
 frames_resume() {	# frames_resume <max seconds>
@@ -113,8 +135,12 @@ if [ "${FORCE:-0}" != 1 ] && [ "${tally:-0}" -gt 5 ]; then
 fi
 
 set_mode "$MODE_A"
-SKIPSMOKE=1 ./mz0380-live.sh load > "$OUT/load.log" 2>&1 ||
-	{ echo "load failed - see $OUT/load.log"; tail -5 "$OUT/load.log"; exit 1; }
+if [ "${REUSE:-0}" = 1 ] && [ -d /sys/module/mz0380 ]; then
+	echo "REUSE=1: keeping the loaded module (srcversion $(cat /sys/module/mz0380/srcversion))"
+else
+	SKIPSMOKE=1 ./mz0380-live.sh load > "$OUT/load.log" 2>&1 ||
+		{ echo "load failed - see $OUT/load.log"; tail -5 "$OUT/load.log"; exit 1; }
+fi
 NODE=$(node)
 [ -n "$NODE" ] || { echo "no video node"; exit 1; }
 ALLOW=$(cat /sys/module/mz0380/parameters/mode_follow)
@@ -130,36 +156,48 @@ ffmpeg -nostdin -hide_banner -loglevel error -f v4l2 -input_format yuv420p \
 FFPID=$!
 t=$(frames_resume 20) && ok "capture running on $MODE_A after ${t}s ($(source_now))" ||
 	{ bad "no frames from $MODE_A after 20 s - nothing to follow from"; exit 1; }
-[ "$(spawns)" = 1 ] || bad "spawns=$(spawns) after the capture start, expected 1"
+# Everything below is counted from here, so a reused module works too.
+S0=$(spawns)
+F0=$(follows)
+echo "   baseline: $S0 spawn(s), $F0 automatic restart(s) used on this load"
+[ $((ALLOW - F0)) -ge 2 ] ||
+	{ bad "only $((ALLOW - F0)) automatic restart(s) left on this load - reload the module (drop REUSE=1)"; exit 1; }
 
-follow_step() {	# follow_step <label> <mode> <expected counter> <expected spawns>
+follow_step() {	# follow_step <label> <mode> <n-th followed change>
+	local want_f=$((F0 + $3)) want_s=$((S0 + $3))
 	echo
-	echo "=== $1: source -> $2 ==="
+	echo "=== $1: swap the source to $2 ==="
 	dmesg -C
-	set_mode "$2"
-	t=$(wait_follows "$3" 30) &&
-		ok "$1: encoder restarted by the driver after ${t}s (mode follow $3 of $ALLOW)" ||
+	swap_to "$2"
+	wait_noticed 20 || {
+		bad "$1: the driver never saw the source change in 20 s - nothing to follow ($(source_now))"
+		return
+	}
+	t=$(wait_follows "$want_f" 30) &&
+		ok "$1: encoder restarted by the driver ${t}s after it saw the change (mode follow $want_f of $ALLOW)" ||
 		{ bad "$1: no automatic restart in 30 s (mode follow $(follows)); log:"
 		  dmesg | grep -E "HDMI|encoder" | sed 's/^.*0000:[0-9a-f:.]* /     /' | tail -5; return; }
 	t=$(frames_resume 20) && ok "$1: frames flowing again ${t}s later ($(source_now))" ||
 		bad "$1: the encoder restarted but no frames followed in 20 s"
-	[ "$(spawns)" = "$4" ] && ok "$1: $4 spawns" || bad "$1: spawns=$(spawns), expected $4"
+	[ "$(spawns)" = "$want_s" ] && ok "$1: one spawn spent ($want_s on this load)" ||
+		bad "$1: spawns=$(spawns), expected $want_s"
 	kill -0 "$FFPID" 2>/dev/null && ok "$1: the capture never ended" ||
 		bad "$1: the capture ended: $(head -1 "$OUT/ffmpeg.log")"
-	dmesg | grep -q "restarting the encoder for it (automatic restart $3 of" ||
+	dmesg | grep -q "restarting the encoder for it (automatic restart $want_f of" ||
 		bad "$1: the restart is not in the log"
 }
 
-follow_step "step 1" "$MODE_B" 1 2
-follow_step "step 2" "$MODE_A" 2 3
+follow_step "step 1" "$MODE_B" 1
+follow_step "step 2" "$MODE_A" 2
 
 echo
 echo "=== step 3: allowance used up - source -> $MODE_B must hold NO SIGNAL ==="
 echo "$(follows)" > /sys/module/mz0380/parameters/mode_follow
 dmesg -C
 before=$(spawns)
-set_mode "$MODE_B"
-sleep 15
+swap_to "$MODE_B"
+wait_noticed 20 || bad "step 3: the driver never saw the source change"
+sleep 12
 [ "$(spawns)" = "$before" ] && ok "step 3: no spawn spent in 15 s" ||
 	bad "step 3: spawns $before -> $(spawns) with the allowance used up"
 dmesg | grep -q "automatic restarts of this load are used up" &&
@@ -167,7 +205,7 @@ dmesg | grep -q "automatic restarts of this load are used up" &&
 	bad "step 3: no 'used up' line in the log"
 state | grep -q "placeholder: SHOWING" && ok "step 3: NO SIGNAL is showing" ||
 	bad "step 3: NO SIGNAL is not showing: $(state | sed -n 's/.*placeholder: //p' | cut -c1-40)"
-set_mode "$MODE_A"
+swap_to "$MODE_A"
 t=$(frames_resume 30) && ok "step 3: back on $MODE_A, frames resumed after ${t}s" ||
 	bad "step 3: frames did not resume on $MODE_A"
 [ "$(spawns)" = "$before" ] && ok "step 3: still $before spawns - the pending replacement was cancelled, not carried out" ||
