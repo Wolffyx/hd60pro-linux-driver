@@ -170,8 +170,28 @@ if load p2 1; then
 	kernel_clean p3
 fi
 
+# The scanner calls a frame partial when its last rows are black. A fill the
+# card had not finished stops at a different row from frame to frame; the same
+# row in every frame is the picture itself (a letterboxed or bordered source),
+# which the first clean M255 run had - 29 black rows in all 300 frames.
+raw_frames_verdict() {
+	local log="$OUT/p4-raw-scan.log" blank partial rows
+	blank=$(sed -n 's/^blank frames *: \([0-9]*\).*/\1/p' "$log")
+	partial=$(sed -n 's/^partial fills *: \([0-9]*\).*/\1/p' "$log")
+	rows=$(grep -o "filled to row [0-9]*" "$log" | sort -u)
+	if [ "${blank:-1}" != 0 ]; then
+		bad "p4: ${blank:-?} blank raw frame(s)"
+	elif [ "${partial:-1}" = 0 ]; then
+		ok "p4: no blank or partial raw frame"
+	elif [ "$partial" = 300 ] && [ "$(echo "$rows" | wc -l)" = 1 ]; then
+		ok "p4: no blank frame; all 300 end at the same row (${rows#filled to }) - black rows in the source picture, not an unfinished fill"
+	else
+		bad "p4: $partial partial raw frame(s), ending at $(echo "$rows" | wc -l) different rows"
+	fi
+}
+
 phase4() {
-	local mode frames errs
+	local mode frames errs nosig
 	echo
 	echo "=== phase 4: real frames through the fragmented slots (2 spawns) ==="
 	mode=$(wait_source 20) || {
@@ -187,10 +207,10 @@ phase4() {
 	grep -q "^frames read *: 300" "$OUT/p4-raw-scan.log" &&
 		ok "p4: 300 raw frames read" ||
 		bad "p4: raw capture short: $(grep '^frames read' "$OUT/p4-raw-scan.log") $(head -1 "$OUT/p4-raw.err")"
-	grep -q "^blank frames *: 0 " "$OUT/p4-raw-scan.log" &&
-		grep -q "^partial fills *: 0" "$OUT/p4-raw-scan.log" &&
-		ok "p4: no blank or partial raw frame" ||
-		bad "p4: $(grep -E '^(blank frames|partial fills)' "$OUT/p4-raw-scan.log" | tr '\n' ' ')"
+	raw_frames_verdict
+	nosig=$(state | sed -n 's/.*, \([0-9]*\) raw NO SIGNAL frames delivered.*/\1/p')
+	[ "${nosig:-0}" = 0 ] && ok "p4: none of the raw frames was the NO SIGNAL picture" ||
+		bad "p4: $nosig of the raw frames were the driver's NO SIGNAL picture - the card delivered no video for them"
 
 	timeout 40 $FF -y -f v4l2 -input_format h264 -i "$NODE" -frames:v 300 \
 		-c copy "$OUT/p4.mkv" < /dev/null 2>"$OUT/p4-h264.err"
