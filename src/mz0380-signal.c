@@ -233,6 +233,95 @@ static unsigned long mz0380_signal_start_pipeline(struct mz0380_dev *dev,
 	return MZ0380_SIGNAL_MONITOR_MS;
 }
 
+/* Size, rate and scan type: what an encoder is started for. */
+static bool mz0380_same_mode(const struct v4l2_dv_timings *a,
+			     const struct v4l2_dv_timings *b)
+{
+	return a->bt.width == b->bt.width && a->bt.height == b->bt.height &&
+	       a->bt.interlaced == b->bt.interlaced &&
+	       mz0380_source_fps(a) == mz0380_source_fps(b);
+}
+
+/*
+ * M256: may the driver replace the encoder for @live by itself?
+ *
+ * Until M256 a source that came back in another mode left the NO SIGNAL
+ * picture up until the application restarted the capture - and OBS never
+ * does, so swapping a 60 Hz device for a 30 Hz one looked like a dead card.
+ *
+ * Only a change the application cannot see in its buffers qualifies: the same
+ * frame size and scan type at another rate. A new size still needs the
+ * application to renegotiate. And only mode_follow times per load, because
+ * every replacement is an encoder spawn, and a source that keeps changing its
+ * mind would otherwise walk the card into its wedge.
+ */
+static bool mz0380_mode_fits_capture(struct mz0380_dev *dev,
+				     const struct v4l2_dv_timings *live)
+{
+	return live->bt.width == dev->capture.width &&
+	       live->bt.height == dev->capture.height &&
+	       live->bt.interlaced == dev->pipeline_source_interlaced;
+}
+
+static bool mz0380_mode_followable(struct mz0380_dev *dev,
+				   const struct v4l2_dv_timings *live)
+{
+	return mz0380_mode_fits_capture(dev, live) &&
+	       dev->mode_follow_restarts < mz0380_mode_follow;
+}
+
+/*
+ * M256: has the new mode held long enough? A reconnecting source can report a
+ * mode it is only passing through (a run measured 1080p60 between two stable
+ * 1080p30 reads), so the same mode has to be measured again and again for
+ * MZ0380_MODE_FOLLOW_SETTLE_MS - three measurements at the pending re-check
+ * rate - before a spawn is spent on it.
+ */
+static bool mz0380_mode_follow_settled(struct mz0380_dev *dev,
+				       const struct v4l2_dv_timings *live)
+{
+	if (!dev->follow_timing ||
+	    !mz0380_same_mode(&dev->follow_timings, live)) {
+		dev->follow_timings = *live;
+		dev->follow_since = jiffies;
+		dev->follow_timing = true;
+		return false;
+	}
+	return time_after_eq(jiffies, dev->follow_since +
+			     msecs_to_jiffies(MZ0380_MODE_FOLLOW_SETTLE_MS));
+}
+
+/* What a mode change leads to, for the one log line that announces it. */
+static const char *mz0380_mode_change_outcome(struct mz0380_dev *dev,
+					      const struct v4l2_dv_timings *live)
+{
+	if (!mz0380_mode_fits_capture(dev, live) || !mz0380_mode_follow)
+		return "NO SIGNAL until the application restarts the capture";
+	if (dev->mode_follow_restarts >= mz0380_mode_follow)
+		return "the automatic restarts of this load are used up; NO SIGNAL until the application restarts the capture";
+	return "NO SIGNAL while it settles, then the encoder restarts for it";
+}
+
+/*
+ * M256: replace the running encoder with one for @live - one encoder spawn.
+ * The session carries on: the application keeps its buffers and its queue,
+ * and sees the NO SIGNAL picture until the new encoder delivers.
+ */
+static unsigned long mz0380_signal_follow_mode(struct mz0380_dev *dev,
+					       const struct v4l2_dv_timings *live)
+{
+	dev->follow_timing = false;
+	dev->mode_follow_restarts++;
+	dev_info(&dev->pci->dev,
+		 "HDMI source held %ux%u%c@%u for %ums; restarting the encoder for it (automatic restart %u of %u, one encoder spawn)\n",
+		 live->bt.width, live->bt.height,
+		 live->bt.interlaced ? 'i' : 'p', mz0380_source_fps(live),
+		 jiffies_to_msecs(jiffies - dev->follow_since),
+		 dev->mode_follow_restarts, mz0380_mode_follow);
+	mz0380_dma_stop_encoder(dev);
+	return mz0380_signal_start_pipeline(dev, live);
+}
+
 /* A pipeline exists and the receiver just produced a stable measurement. */
 static unsigned long mz0380_signal_check_pipeline(struct mz0380_dev *dev,
 						  const struct v4l2_dv_timings *live)
@@ -245,17 +334,23 @@ static unsigned long mz0380_signal_check_pipeline(struct mz0380_dev *dev,
 		if (!pending) {
 			mz0380_signal_event(dev);
 			dev_info(&dev->pci->dev,
-				 "HDMI source changed to %ux%u%c@%u (encoder runs %ux%u%c@%u); NO SIGNAL until the application restarts the capture\n",
+				 "HDMI source changed to %ux%u%c@%u (encoder runs %ux%u%c@%u); %s\n",
 				 live->bt.width, live->bt.height,
 				 live->bt.interlaced ? 'i' : 'p',
 				 mz0380_source_fps(live),
 				 dev->pipeline_source_width,
 				 dev->pipeline_source_height,
 				 dev->pipeline_source_interlaced ? 'i' : 'p',
-				 dev->pipeline_source_fps);
+				 dev->pipeline_source_fps,
+				 mz0380_mode_change_outcome(dev, live));
 		}
+		if (mz0380_mode_followable(dev, live) &&
+		    mz0380_mode_follow_settled(dev, live))
+			return mz0380_signal_follow_mode(dev, live);
 		return MZ0380_SIGNAL_MONITOR_MS;
 	}
+	/* Back on the pipeline's mode: whatever was being timed is moot. */
+	dev->follow_timing = false;
 
 	/*
 	 * A reconnect can expose a transient timing while the source negotiates
@@ -287,6 +382,8 @@ static unsigned long mz0380_signal_unlocked(struct mz0380_dev *dev)
 
 	mz0380_signal_clear(dev);
 	mz0380_no_signal_activate(dev, "receiver unlocked");
+	/* M256: a mode has to hold without a drop-out to be followed. */
+	dev->follow_timing = false;
 	if (first_loss) {
 		WRITE_ONCE(dev->signal_recovering, true);
 		dev->signal_recovery_attempts = 0;
@@ -362,7 +459,15 @@ static unsigned long mz0380_signal_monitor_step(struct mz0380_dev *dev)
 	if (!locked)
 		return mz0380_signal_unlocked(dev);
 
-	if (running && last && !recovering && time_after_eq(jiffies, last + stall))
+	/*
+	 * M256: not while a replacement is pending. An encoder set up for
+	 * another mode is expected to go quiet, and the silence handler acts
+	 * once per silence and then returns early for good - which would stop
+	 * the re-measurements that time the new mode (and that notice the old
+	 * one coming back).
+	 */
+	if (running && last && !recovering && !pending &&
+	    time_after_eq(jiffies, last + stall))
 		return mz0380_signal_silent(dev, last);
 
 	/* A healthy configured pipeline needs no full multi-register read. */
@@ -425,6 +530,7 @@ void mz0380_signal_recovery_start(struct mz0380_dev *dev)
 	dev->signal_recovery_attempts = 0;
 	dev->silent_stamp = 0;
 	dev->pending_measure_stamp = 0;
+	dev->follow_timing = false;
 	WRITE_ONCE(dev->h264_waiting_for_idr, true);
 	WRITE_ONCE(dev->last_h264_frame_stamp, jiffies);
 	mod_delayed_work(MZ0380_SYSTEM_WQ, &dev->signal_recovery_work, 0);

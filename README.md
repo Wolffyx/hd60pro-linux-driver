@@ -16,7 +16,7 @@ budget](#the-encoder-spawn-budget) before you start experimenting.
 | Video | HDMI in, 1920x1080 at the source rate (50/60 fps tested; 1080i, 720p and 480p are detected but untested) |
 | Formats | `YU12` (I420), `NV12`, `YV12` uncompressed, and `H264` from the card's own encoder |
 | No source | a NO SIGNAL picture at 2 fps instead of a frozen frame or a timeout, in every format |
-| Hot-plug | unplug and replug the source mid-capture; the stream carries on |
+| Hot-plug | unplug and replug the source mid-capture, or swap it for one at another frame rate; the stream carries on |
 | Audio | HDMI audio as an ALSA capture device - **experimental**, off by default |
 | Conformance | `v4l2-compliance` clean |
 
@@ -179,6 +179,15 @@ There is no scaler: the frame size is the source's. A source that changes
 resolution mid-capture raises a V4L2 `SOURCE_CHANGE` event, shows NO SIGNAL,
 and the application restarts the capture at the new size.
 
+A source that changes only its frame rate - a 60 Hz device swapped for a 30 Hz
+one - is followed without the application doing anything: once the new mode
+has held for about four seconds the driver restarts the card's encoder for it,
+and the picture returns a few seconds later. Each such restart is one encoder
+spawn, so the driver does it at most `mode_follow` times per load (4 by
+default). After that, or with `mode_follow=0`, NO SIGNAL stays up until the
+application restarts the capture - in OBS, re-select the device in the
+source's properties.
+
 The frame rate is the source's. A 30 fps game over a 60 Hz HDMI link arrives
 as 60 frames per second with every frame doubled - that is the source, not the
 driver.
@@ -196,6 +205,7 @@ None are needed. `modinfo mz0380` lists them all; the ones worth knowing:
 | `raw_deliver` | 1 | startup format for applications that never choose one: 1 = YU12, 0 = H.264 |
 | `persistent_h264` | 1 | keep the encoder running between captures - leave on |
 | `stream_without_signal` | 1 | allow a capture to start with no source (shows NO SIGNAL) |
+| `mode_follow` | 4 | automatic encoder restarts per load when the source changes frame rate; 0 = leave it to the application |
 | `h264_frame_divisor` | 0 | 0 = encode every frame; 2 = every second frame |
 | `post_skip` | 0 | uncompressed decimation: deliver one in `post_skip+1` frames |
 | `raw_full_range` | 0 | label uncompressed formats full-range (0-255) |
@@ -231,6 +241,11 @@ power-up has to reset the HDMI receiver, and a camera reads that as an unplug;
 most come back within a few seconds. Reloading the module keeps the receiver
 as it is, so the source sees nothing. If a source does not come back,
 `echo hpd 1 | sudo tee /proc/mz0380-hdmi` sends it one hot-plug pulse.
+
+**NO SIGNAL stays up after swapping devices** - the new device sends another
+resolution, or the automatic restarts are used up (`mode follow` in
+`/proc/mz0380-state`, and the log says which). Restart the capture in the
+application; a module reload is not needed.
 
 **Wrong colours** (green/magenta cast) after the source switched modes -
 `echo csc | sudo tee /proc/mz0380-hdmi` re-reads the source colour space.

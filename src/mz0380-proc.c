@@ -196,6 +196,10 @@ static void mz0380_state_receiver(struct seq_file *m, struct mz0380_dev *dev)
 		seq_puts(m, ", CSC never written\n");
 	seq_printf(m, "  rearms     : %llu MST3367 AUTO_POSITION re-arms (only on real lock loss since M233)\n",
 		   (unsigned long long)dev->mst_rearms);
+	/* M256: the count that says a mode change was followed, and what is left. */
+	seq_printf(m, "  mode follow: %u of %u automatic encoder restart(s) used after a source mode change%s\n",
+		   dev->mode_follow_restarts, mz0380_mode_follow,
+		   dev->follow_timing ? "; a new mode is being timed now" : "");
 	seq_printf(m, "  placeholder: %s, %llu NO SIGNAL IDRs delivered, %llu cadence misses, %llu raw NO SIGNAL frames delivered\n",
 		   READ_ONCE(dev->no_signal_active) ?
 		   "SHOWING (no usable source)" : "not shown (source is live)",

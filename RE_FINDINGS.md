@@ -15999,3 +15999,85 @@ SIGNAL to video with some devices". It is the M247 hold, working as written:
 a source that returns in another mode leaves the NO SIGNAL picture up until
 the application restarts the capture, and OBS never does. Three such holds are
 in that day's log (25p -> 60p, 25p -> 60p, 60p -> 30p). M256 changes it.
+
+## M256 (hardware, 2026-11-15): follow a source that changes frame rate
+
+The M255 session's complaint was the M247 hold: a source that returns in
+another mode sets `pipeline_reconfigure_pending`, the drain delivers nothing,
+and the NO SIGNAL picture stays up until the application restarts the capture.
+GStreamer does, on the SOURCE_CHANGE event. OBS does not, so swapping a 60 Hz
+device for a 30 Hz one mid-capture looks like a dead card until the source is
+re-selected by hand or the module is reloaded.
+
+The hold exists for two reasons that still stand: a replacement is an encoder
+spawn, and a reconnecting source can report a mode it is only passing through
+(M247 measured 1080p60 between two stable 1080p30 reads). So the change is
+narrow. `mz0380_signal_check_pipeline()` now restarts the encoder itself when
+all of these hold:
+
+- the new mode has the frame size the capture was negotiated for and the same
+  scan type - only the rate differs, so the application's buffers still fit;
+- the same mode was measured for `MZ0380_MODE_FOLLOW_SETTLE_MS` (4 s: three
+  measurements at the 2 s pending re-check), with no unlock in between;
+- fewer than `mode_follow` (default 4, per load) such restarts were made.
+
+Otherwise it behaves as before, and the one log line that announces a mode
+change says which outcome applies. `mode follow` in `/proc/mz0380-state`
+counts the restarts.
+
+Two things had to change for the timing to be reachable at all:
+
+- `mz0380_dma_stop()` cancels the signal monitor, which is the work this runs
+  in. The encoder stop is split out as `mz0380_dma_stop_encoder()`.
+- The silence handler acts once per silence and then returns early for good.
+  An encoder set up for another mode goes quiet, so with a replacement pending
+  the monitor stopped re-measuring altogether - neither the new mode's timer
+  nor the existing "timing returned" cancel could run. Silence is no longer
+  handled while a replacement is pending.
+
+That second point may also be a pre-M256 defect: a transient mode change that
+silenced the encoder would have left the pending flag set after the source
+returned. Not demonstrated.
+
+### On hardware (same day, kernel 7.3.4, GPU loop on HDMI-A-1, raw capture)
+
+Two followed changes, made by hand with the M256 build loaded: output off for
+3 s, then on in the other mode, under one `ffmpeg` capture that never ended.
+
+```text
+18:51:37 HDMI signal lost; showing NO SIGNAL until it returns
+18:51:39 HDMI source changed to 1920x1080p@30 (encoder runs 1920x1080p@60); NO SIGNAL while it settles, then the encoder restarts for it
+18:51:43 HDMI source held 1920x1080p@30 for 4383ms; restarting the encoder for it (automatic restart 1 of 4, one encoder spawn)
+18:51:47 encoder started: 1920x1080p@30 -> raw, encoder spawn 2 since load
+18:52:10 HDMI source changed to 1920x1080p@60 (encoder runs 1920x1080p@30); ...
+18:52:15 HDMI source held 1920x1080p@60 for 4405ms; restarting the encoder for it (automatic restart 2 of 4, one encoder spawn)
+18:52:18 encoder started: 1920x1080p@60 -> raw, encoder spawn 3 since load
+```
+
+Frames were back about 10 s after the output came on: 2 s to lock and measure,
+4.4 s of settling, 3-4 s for the encoder. Delivery then ran at the new rate
+(60 frames per 2 s at 30 Hz, 121 per 2 s at 60 Hz). The counter went 0 -> 1 ->
+2 and the spawn count 1 -> 2 -> 3, one per change. Power cycle at 12 spawns
+afterwards, no wedge.
+
+**Not run:** step 3 of the script (allowance used up: the hold, and the cancel
+when the source returns to the encoder's mode), H.264 mode, and any 50/25 Hz
+mode.
+
+### A rate change with the link up is invisible to the driver
+
+The script's first version only switched the output's refresh rate. KDE
+reported 30 Hz and the card's frame events dropped from 60 to 30 per second,
+but the receiver never dropped lock and frames kept flowing through the
+encoder that was started for 60 - so the monitor, which does not touch the
+receiver while frames arrive, never measured the source again. No NO SIGNAL,
+no pending replacement, and `/proc/mz0380-state` kept saying `source :
+1920x1080p @ 60 fps` with 30 arriving.
+
+Two consequences. The test has to drop the link to be a test (it does now).
+And an encoder started for 60 Hz delivers a 30 Hz source's raw frames
+correctly - which suggests the M247 hold, and the M256 restart that replaces
+it, may be more than a same-size rate change needs in raw mode. Accepting the
+new rate without a restart would cost no spawn at all. Not pursued: one
+direction, one mode family (60/30 share a line length; 50/25 do not), and
+nothing known about H.264, whose rate control is set from the frame rate.

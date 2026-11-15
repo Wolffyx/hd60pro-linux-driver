@@ -64,6 +64,7 @@
 #define MZ0380_HOTPLUG_RETRY_MS		500	/* receiver poll while recovering  */
 #define MZ0380_UNSUPPORTED_RETRY_MS	3000	/* a locked mode we cannot capture */
 #define MZ0380_PENDING_RECHECK_MS	2000	/* replacement pending, still live */
+#define MZ0380_MODE_FOLLOW_SETTLE_MS	4000	/* a new mode must hold this long  */
 #define MZ0380_CARD_READY_TIMEOUT_MS	15000	/* CMD_INIT retries after boot     */
 #define MZ0380_NO_SIGNAL_FPS		2
 /* A raw frame this recent means the source is live; no placeholder needed. */
@@ -274,6 +275,11 @@ struct mz0380_dev {
 	unsigned long last_h264_frame_stamp;
 	unsigned long silent_stamp;	/* producer silence already handled */
 	unsigned long pending_measure_stamp;
+	/* M256: a source that came back in another mode, being timed. */
+	struct v4l2_dv_timings follow_timings;
+	unsigned long follow_since;
+	bool follow_timing;
+	u32 mode_follow_restarts;	/* automatic replacements, per load */
 	u32 signal_recovery_attempts;
 	bool signal_recovering;
 	bool signal_lost_reported;
@@ -412,6 +418,7 @@ enum mz0380_fault_inject {
 	MZ0380_INJECT_BUSMASTER_OFF = 3,	/* STREAMON reads bus mastering as off */
 };
 extern unsigned int mz0380_fault_inject;
+extern unsigned int mz0380_mode_follow;
 extern bool mz0380_aic_every_frame;
 extern unsigned int mz0380_aic_channels;
 extern unsigned int mz0380_aic_bits;
@@ -501,6 +508,7 @@ void mz0380_dma_blocks_count(const struct mz0380_dma_buf *bufs, unsigned int n,
 			     unsigned int *contiguous, unsigned int *fragmented);
 int mz0380_dma_start(struct mz0380_dev *dev);
 void mz0380_dma_stop(struct mz0380_dev *dev);
+void mz0380_dma_stop_encoder(struct mz0380_dev *dev);
 void mz0380_dma_quiesce(struct mz0380_dev *dev);
 /*
  * Non-sleeping pre-ACK hook. mz0380_mb_ack_event() calls it with the live
