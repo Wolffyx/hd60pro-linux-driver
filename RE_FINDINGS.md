@@ -15999,3 +15999,48 @@ SIGNAL to video with some devices". It is the M247 hold, working as written:
 a source that returns in another mode leaves the NO SIGNAL picture up until
 the application restarts the capture, and OBS never does. Three such holds are
 in that day's log (25p -> 60p, 25p -> 60p, 60p -> 30p). M256 changes it.
+
+## M256 (static, 2026-11-15): follow a source that changes frame rate - NOT yet run on hardware
+
+The M255 session's complaint was the M247 hold: a source that returns in
+another mode sets `pipeline_reconfigure_pending`, the drain delivers nothing,
+and the NO SIGNAL picture stays up until the application restarts the capture.
+GStreamer does, on the SOURCE_CHANGE event. OBS does not, so swapping a 60 Hz
+device for a 30 Hz one mid-capture looks like a dead card until the source is
+re-selected by hand or the module is reloaded.
+
+The hold exists for two reasons that still stand: a replacement is an encoder
+spawn, and a reconnecting source can report a mode it is only passing through
+(M247 measured 1080p60 between two stable 1080p30 reads). So the change is
+narrow. `mz0380_signal_check_pipeline()` now restarts the encoder itself when
+all of these hold:
+
+- the new mode has the frame size the capture was negotiated for and the same
+  scan type - only the rate differs, so the application's buffers still fit;
+- the same mode was measured for `MZ0380_MODE_FOLLOW_SETTLE_MS` (4 s: three
+  measurements at the 2 s pending re-check), with no unlock in between;
+- fewer than `mode_follow` (default 4, per load) such restarts were made.
+
+Otherwise it behaves as before, and the one log line that announces a mode
+change says which outcome applies. `mode follow` in `/proc/mz0380-state`
+counts the restarts.
+
+Two things had to change for the timing to be reachable at all:
+
+- `mz0380_dma_stop()` cancels the signal monitor, which is the work this runs
+  in. The encoder stop is split out as `mz0380_dma_stop_encoder()`.
+- The silence handler acts once per silence and then returns early for good.
+  An encoder set up for another mode goes quiet, so with a replacement pending
+  the monitor stopped re-measuring altogether - neither the new mode's timer
+  nor the existing "timing returned" cancel could run. Silence is no longer
+  handled while a replacement is pending.
+
+That second point may also be a pre-M256 defect: a transient mode change that
+silenced the encoder would have left the pending flag set after the source
+returned. Not demonstrated.
+
+`scripts/mz0380-m256-mode-follow-test.sh` switches the GPU loop between 60 and
+30 Hz under one capture: two followed changes, then the allowance set to
+"used up" to prove the hold and the cancel still work. Three spawns. Builds
+clean with `W=1` on 7.3.4; **no hardware run yet** - the power cycle was at 9
+spawns when this was written.

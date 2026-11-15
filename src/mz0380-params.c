@@ -51,6 +51,11 @@ module_param_named(dma_iova_base, mz0380_dma_iova_base, ullong, 0444);
 MODULE_PARM_DESC(dma_iova_base,
 		 "4 GiB-aligned IOVA where the DMA windows start (default 0x100000000). Change only if the driver reports the range is already mapped");
 
+unsigned int mz0380_mode_follow = 4;
+module_param_named(mode_follow, mz0380_mode_follow, uint, 0644);
+MODULE_PARM_DESC(mode_follow,
+		 "how many times per load the driver may restart the encoder by itself when the source comes back in another frame rate at the same size (default 4; each costs one encoder spawn). 0 = never: NO SIGNAL stays up until the application restarts the capture");
+
 unsigned int mz0380_fault_inject;
 module_param_named(fault_inject, mz0380_fault_inject, uint, 0644);
 MODULE_PARM_DESC(fault_inject,

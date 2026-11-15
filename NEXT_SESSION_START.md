@@ -133,6 +133,8 @@ read it before believing the fix.**
   `/proc/mz0380-state` costs no card traffic at any rate now.
 - `scripts/mz0380-m238-chroma-test.sh`, `scripts/mz0380-m243-brightness-ab.sh`.
 - `scripts/mz0380-compliance.sh` - v4l2-compliance, zero spawns.
+- `scripts/mz0380-m256-mode-follow-test.sh` - a running capture follows a frame-rate
+  change (GPU loop, 3 spawns). **Not yet run on hardware.**
 - `scripts/mz0380-m255-dma-paths-test.sh` - the fragmented-slot fallback and the
   bus-master STREAMON refusal, forced with `fault_inject` (0 spawns; `capture` adds 2).
 - `scripts/mz0380-source-check.sh` - what is the source sending, zero spawns.

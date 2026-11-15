@@ -377,11 +377,13 @@ void mz0380_dma_quiesce(struct mz0380_dev *dev)
 	mz0380_dma_flush_events(dev);
 }
 
-/* The final stop: unload, a pipeline replacement, or a non-persistent STREAMOFF. */
-void mz0380_dma_stop(struct mz0380_dev *dev)
+/*
+ * Stop the card's encoder and nothing else. M256: the signal monitor replaces
+ * a pipeline inside a streaming session with this, so it must neither end the
+ * session nor cancel the monitor - which is the work it is called from.
+ */
+void mz0380_dma_stop_encoder(struct mz0380_dev *dev)
 {
-	WRITE_ONCE(dev->streaming, false);
-	mz0380_signal_recovery_stop(dev);
 	if (dev->dma_armed && READ_ONCE(dev->pipeline_running)) {
 		int ret = mz0380_stream_stop_all(dev, 2000);
 
@@ -393,4 +395,12 @@ void mz0380_dma_stop(struct mz0380_dev *dev)
 		WRITE_ONCE(dev->pipeline_running, false);
 	}
 	mz0380_dma_flush_events(dev);
+}
+
+/* The final stop: unload, a pipeline replacement, or a non-persistent STREAMOFF. */
+void mz0380_dma_stop(struct mz0380_dev *dev)
+{
+	WRITE_ONCE(dev->streaming, false);
+	mz0380_signal_recovery_stop(dev);
+	mz0380_dma_stop_encoder(dev);
 }
