@@ -15950,3 +15950,52 @@ Result, two reads:
 So the decision M253 changed takes the bypass branch for the camera: YCbCr
 sources are unaffected. Not re-measured: camera black level in a raw capture
 (earlier ~20); the bypass branch's code is unchanged since before M253.
+
+## M255 (hardware, 2026-11-15): the two DMA paths from pull request #3, forced and observed
+
+Pull request #3 (elsell) brought two paths that never run on a healthy
+machine: a fragmented-page fallback for a contiguous allocation that fails,
+and a STREAMON refusal when PCI bus mastering is off. Both were ported onto
+the post-M247 tree - the refusal unchanged, the fallback moved into
+`mz0380_map_block()` because the allocators it patched were gone - and neither
+had ever been seen to execute. The kernel has no fault injection built in
+(`CONFIG_FAULT_INJECTION` unset), so the driver got its own: `fault_inject`
+(test only) and a `dma slots` line in `/proc/mz0380-state`.
+
+`scripts/mz0380-m255-dma-paths-test.sh capture`, kernel 7.3.4, 1080p30 YUV422
+source, card `1cfa:0006`:
+
+- **Unwind** (`fault_inject=2`): each mapping failed 524288 bytes in, was
+  unmapped and freed; the load survived with streaming unavailable and
+  STREAMON refused (ENODEV).
+- **Fallback** (`fault_inject=1`): `H.264 0 contiguous + 4 fragmented` at the
+  IOVAs the failed attempt had used - a leaked mapping would have read
+  "already mapped". v4l2-compliance 48/48.
+- **Refusal** (`fault_inject=3`): STREAMON EIO, counter 0 -> 1, 0 spawns,
+  v4l2-compliance 48/48 afterwards.
+- **Video through the fragmented slots**: 301 raw frames, then 302 H.264
+  frames (0 dropped) that decode with no error. 2 spawns. No kernel warning,
+  no IOMMU fault beyond the known pre-ready one at 0x90000000.
+
+The zero-spawn phases passed in five runs. The first four capture runs failed
+for reasons that were the script's, and each is worth remembering:
+
+- `ffmpeg` under `timeout` on a terminal is stopped by SIGTTOU before it opens
+  the device (background process group touching the tty). It never reached
+  STREAMON, so the spawn count stayed at 1 and it looked like a dead H.264
+  path. `-nostdin` and a closed stdin fix it; reproduced on a pty.
+- `v4l2-ctl --stream-mmap` queries the DV timings first and waits for a source
+  when none is locked, without calling STREAMON. Use ffmpeg to provoke a
+  STREAMON that must happen.
+- The M226 scanner calls a frame partial when its last rows are black. A
+  source with a border has the same rows black in every frame (29 rows here);
+  an unfinished fill stops at a different row each time.
+
+Not tested: the fallback for the audio slots, a real (unforced) allocation
+failure, and bus mastering actually cleared on the card.
+
+The same session explained a complaint that the card "does not go from NO
+SIGNAL to video with some devices". It is the M247 hold, working as written:
+a source that returns in another mode leaves the NO SIGNAL picture up until
+the application restarts the capture, and OBS never does. Three such holds are
+in that day's log (25p -> 60p, 25p -> 60p, 60p -> 30p). M256 changes it.
