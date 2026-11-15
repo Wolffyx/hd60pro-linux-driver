@@ -19,11 +19,12 @@
 #   up here as "already mapped". v4l2-compliance must stay clean.
 # Phase 3  the bus-master refusal. fault_inject=3 makes STREAMON read bus
 #   mastering as off: it must fail with EIO, count the refusal, spend no spawn
-#   and leave the queue usable (compliance again, then a normal STREAMON try
-#   is left to phase 4).
+#   and leave the queue usable (v4l2-compliance again).
 # Phase 4  (capture) real frames through the fragmented slots: 300 raw frames
 #   scanned for blanks, then 300 H.264 frames that must decode. Raw is the
 #   first capture after a load (one spawn), H.264 a format switch (one more).
+#   Needs a steady 1080p source: it waits for a lock before spending anything,
+#   and says so if the source dropped out while it was capturing.
 #
 # The script ends by reloading the module with fault_inject=0.
 # Pass: no "!!" lines. OBS closed, as for every hardware run.
@@ -33,14 +34,20 @@ cd "$(dirname "$0")/.."
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 MODE=${1:-}
 case "$MODE" in ''|capture) ;; *) echo "usage: $0 [capture]"; exit 1;; esac
-for tool in v4l2-ctl v4l2-compliance; do
-	command -v "$tool" >/dev/null || { echo "$tool not found (install v4l-utils)"; exit 1; }
+for tool in v4l2-ctl v4l2-compliance ffmpeg; do
+	command -v "$tool" >/dev/null || { echo "$tool not found (v4l-utils, ffmpeg)"; exit 1; }
 done
 if [ "$MODE" = capture ]; then
-	for tool in ffmpeg ffprobe python3; do
+	for tool in ffprobe python3; do
 		command -v "$tool" >/dev/null || { echo "$tool not found"; exit 1; }
 	done
 fi
+
+# Every ffmpeg here runs with -nostdin and stdin closed. Under `timeout` it is
+# in a background process group, and one that touches the terminal is stopped
+# by SIGTTOU before it opens the device - it then sits there until the timeout
+# kills it, having captured nothing (the first M255 runs lost phase 4 to this).
+FF="ffmpeg -nostdin -hide_banner -loglevel error"
 
 OUT=$(mktemp -d /tmp/mz0380-m255.XXXXXX)
 chmod 755 "$OUT"
@@ -80,15 +87,36 @@ kernel_clean() {	# kernel_clean <label>
 	ok "$1: no kernel warnings, no unexpected IOMMU faults"
 }
 
-streamon() {	# streamon <label> - one buffer, bounded; output kept
-	timeout 15 v4l2-ctl -d "$NODE" --stream-mmap --stream-count=1 \
-		--stream-to=/dev/null > "$OUT/$1-streamon.log" 2>&1
+# One STREAMON, bounded, output kept. ffmpeg rather than v4l2-ctl: v4l2-ctl
+# queries the DV timings first and, with no source locked at that instant,
+# waits for one without ever calling STREAMON - the first M255 run failed
+# phase 3 that way, with an empty log and no refusal counted.
+streamon() {	# streamon <label>
+	timeout 15 $FF -f v4l2 -input_format yuv420p -video_size 1920x1080 \
+		-i "$NODE" -frames:v 1 -f null - < /dev/null > "$OUT/$1-streamon.log" 2>&1
+}
+
+# Phase 4 judges frames, so it needs a source that stays put. Wait for a lock,
+# and afterwards refuse to blame the driver for a source that dropped out.
+wait_source() {	# wait_source <max seconds> - prints the mode once locked
+	local i
+	for i in $(seq "$1"); do
+		if timeout 10 v4l2-ctl -d "$NODE" --query-dv-timings 2>/dev/null | grep -q "Active width"; then
+			state | sed -n 's/.*source     : //p'
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+source_dropped() {	# true if the log since the last dmesg -C shows a loss
+	dmesg | grep -qE "HDMI signal lost|HDMI source: no signal|started with no HDMI signal|no frames for"
 }
 
 compliance() {	# compliance <label>
 	v4l2-compliance -d "$NODE" > "$OUT/$1-compliance.log" 2>&1
 	if grep -q "Failed: 0, Warnings: 0" "$OUT/$1-compliance.log"; then
-		ok "$1: $(grep '^Total' "$OUT/$1-compliance.log" | sed 's/.*: //')"
+		ok "$1: v4l2-compliance $(grep '^Total' "$OUT/$1-compliance.log" | sed 's/.*video[0-9]*: //')"
 	else
 		bad "$1: v4l2-compliance: $(grep '^Total' "$OUT/$1-compliance.log")"
 	fi
@@ -142,11 +170,19 @@ if load p2 1; then
 	kernel_clean p3
 fi
 
-if [ "$MODE" = capture ] && [ -n "${NODE:-}" ] && [ "$FAILS" = 0 ]; then
+phase4() {
+	local mode frames errs
 	echo
 	echo "=== phase 4: real frames through the fragmented slots (2 spawns) ==="
-	ffmpeg -hide_banner -loglevel error -f v4l2 -input_format yuv420p \
-		-video_size 1920x1080 -i "$NODE" -frames:v 300 -f rawvideo - 2>"$OUT/p4-raw.err" |
+	mode=$(wait_source 20) || {
+		bad "p4: no HDMI source locked after 20 s - not spending spawns; connect a steady 1080p source and rerun"
+		return
+	}
+	echo "   source: $mode"
+	dmesg -C
+
+	$FF -f v4l2 -input_format yuv420p -video_size 1920x1080 -i "$NODE" \
+		-frames:v 300 -f rawvideo - < /dev/null 2>"$OUT/p4-raw.err" |
 		python3 scripts/mz0380-m226-blackframe-scan.py > "$OUT/p4-raw-scan.log" 2>&1
 	grep -q "^frames read *: 300" "$OUT/p4-raw-scan.log" &&
 		ok "p4: 300 raw frames read" ||
@@ -156,19 +192,27 @@ if [ "$MODE" = capture ] && [ -n "${NODE:-}" ] && [ "$FAILS" = 0 ]; then
 		ok "p4: no blank or partial raw frame" ||
 		bad "p4: $(grep -E '^(blank frames|partial fills)' "$OUT/p4-raw-scan.log" | tr '\n' ' ')"
 
-	timeout 40 ffmpeg -hide_banner -loglevel error -y -f v4l2 -input_format h264 \
-		-i "$NODE" -frames:v 300 -c copy "$OUT/p4.mkv" 2>"$OUT/p4-h264.err"
+	timeout 40 $FF -y -f v4l2 -input_format h264 -i "$NODE" -frames:v 300 \
+		-c copy "$OUT/p4.mkv" < /dev/null 2>"$OUT/p4-h264.err"
 	frames=$(ffprobe -v error -count_frames -select_streams v:0 \
 		-show_entries stream=nb_read_frames -of csv=p=0 "$OUT/p4.mkv" 2>/dev/null)
 	[ "${frames:-0}" -ge 290 ] && ok "p4: $frames H.264 frames recorded" ||
 		bad "p4: only ${frames:-0} H.264 frames recorded: $(head -1 "$OUT/p4-h264.err")"
-	errs=$(ffmpeg -v error -i "$OUT/p4.mkv" -f null - 2>&1 | wc -l)
+	errs=$($FF -i "$OUT/p4.mkv" -f null - < /dev/null 2>&1 | wc -l)
 	[ "$errs" = 0 ] && ok "p4: the H.264 stream decodes with no error" ||
 		bad "p4: $errs decoder error line(s) in the H.264 stream"
 	state | grep -E "h264 frames|raw frames|dma slots|enc spawns" | sed 's/^ */   /'
 	[ "$(spawns)" = 2 ] && ok "p4: 2 spawns, as budgeted" ||
 		bad "p4: spawns=$(spawns), expected 2 - something else opened the node? (scripts/mz0380-node-holders.sh)"
+	if source_dropped; then
+		bad "p4: the HDMI source dropped out during the captures - the frame results above are not the driver's; rerun with a steady source:"
+		dmesg | grep -E "HDMI signal|HDMI source|no frames for" | sed 's/^.*0000:[0-9a-f:.]* /     /' | tail -6
+	fi
 	kernel_clean p4
+}
+
+if [ "$MODE" = capture ] && [ -n "${NODE:-}" ] && [ "$FAILS" = 0 ]; then
+	phase4
 elif [ "$MODE" = capture ]; then
 	echo
 	echo "phase 4 skipped: an earlier phase failed, not spending spawns on it"
