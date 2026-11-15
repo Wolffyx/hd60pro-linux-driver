@@ -1,31 +1,23 @@
 #!/bin/bash
 # Load the driver and LEAVE IT LOADED, so OBS (or any V4L2 app) can open the
-# node and you can watch what the card does. Companion to the m55 harness,
-# which always unloads on exit.
+# node and you can watch what the card does.
 #
 #   sudo ./mz0380-live.sh load      # build, smoke-test, insmod, print node
 #   sudo ./mz0380-live.sh status    # what is the card doing right now
 #   sudo ./mz0380-live.sh watch     # follow the driver's log until Ctrl-C
 #   sudo ./mz0380-live.sh unload    # kill users of the node, rmmod, tidy up
 #
-# Takes the same env knobs as m55 (POLLDRAIN VICFW VICB0 MSTB1 MSTB2 MSTB5
-# POSTMASK POSTSKIP POSTAVG RAWDELIVER
-# B0LATE KICKOP KICKREP OP6KICK WINSEQ INTX SETBUF ... plus EXTRA="p=v ...").
-# POLLDRAIN remains available for the legacy raw-preview path. H264PROBE=1 uses
-# the dedicated window-1 completion ring and does not need polling.
+# Optional knobs (passed only when set, so the module defaults govern):
+#   RAWDELIVER=0|1   startup format (default raw YU12)
+#   PERSIST=0|1      keep the encoder running between captures (default 1)
+#   H264DIVISOR=N    H.264 frame schedule (0 = every frame)
+#   POSTSKIP=N       raw decimation (deliver one in N+1 frames)
+#   KO=path          load this module instead of building the tree
+#   TRACE=1          log every mailbox command (dynamic debug "mbx ...")
+#   EXTRA="p=v ..."  any other module parameter
 #
-# READ THIS BEFORE YOU WATCH OBS
-#
-#   * With H264PROBE=1, persistent_h264 defaults on: the first STREAMON creates
-#     one encoder and later OBS STREAMOFF/STREAMON cycles only detach/attach VB2.
-#     A true HDMI timing change cleanly replaces the encoder once at the next
-#     attachment. `status` prints both pipeline state and the SET_VIC count.
-#   * With no HDMI source, the H.264 path now returns a host-owned NO SIGNAL
-#     IDR at low cadence and spends no SET_VIC. Stable lock starts the card
-#     pipeline once; unplug keeps that pipeline draining while the placeholder
-#     is shown, and reconnect switches back only at a clean live IDR.
-#   * When the card wedges, every command returns -110 and only a power cycle
-#     AT MAINS clears it (slot standby survives a soft power-off).
+# The card wedges somewhere in 8-18 encoder spawns per power cycle; only a
+# power cycle AT MAINS clears it. `status` shows the count.
 set -u
 cd "$(dirname "$0")"
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
@@ -114,25 +106,8 @@ status)
 	echo "initstate     : $(cat /sys/module/mz0380/initstate 2>/dev/null)"
 	echo "users         : $(cat /sys/module/mz0380/refcnt 2>/dev/null)"
 	echo
-	echo "--- receiver / signal (last few) ---"
-	dmesg | grep -E 'MST3367 signal|detect 55=' | tail -5
-	echo
-	echo "--- encoder spawns this session (budget is ~8-18 per power cycle) ---"
-	SET_VIC_COUNT=$(sed -n 's/^  enc spawns : \([0-9][0-9]*\).*/\1/p' \
-		/proc/mz0380-state 2>/dev/null | head -1)
-	if [ -z "$SET_VIC_COUNT" ]; then
-		SET_VIC_COUNT=$(dmesg | grep -c 'stream start: SET_VIC')
-	fi
-	printf '  SET_VIC sent    : %s\n' "$SET_VIC_COUNT"
-	if grep -q '^  h264 frames:' /proc/mz0380-state 2>/dev/null; then
-		sed -n 's/^  pipeline[[:space:]]*:/  pipeline      :/p' /proc/mz0380-state
-		sed -n 's/^  h264 frames:/  h264 frames   :/p' /proc/mz0380-state
-		sed -n 's/^  no signal :/  no signal     :/p' /proc/mz0380-state
-		sed -n 's/^  recovery  :/  recovery      :/p' /proc/mz0380-state
-		sed -n 's/^  encoded rate:/  encoded rate  :/p' /proc/mz0380-state
-	else
-		printf '  frames delivered: %s\n' "$(dmesg | grep -c 'inferred payload length=')"
-	fi
+	grep -E '^  (card|source|pixelformat|enc spawns|pipeline|placeholder|h264 frames|raw frames|recovery)' \
+		/proc/mz0380-state 2>/dev/null
 	printf '  command timeouts: %s\n' "$(dmesg | grep -c 'ret=-110')"
 	echo
 	echo "--- last driver lines ---"
@@ -173,64 +148,26 @@ load)
 	modprobe -a videodev videobuf2-v4l2 videobuf2-vmalloc v4l2-dv-timings snd-pcm
 
 	# M89: pass a knob ONLY when the caller set it, so the driver's own default
-	# governs otherwise. Hardcoding "${VAR:-<literal>}" here silently overrides
-	# the module default the moment the two drift apart.
+	# governs otherwise.
 	OPTARGS=""
 	add_opt() { [ -z "$2" ] || OPTARGS="$OPTARGS $1=$2"; }
-	add_opt vic_fw          "${VICFW:-}"
-	add_opt vic_out_format  "${VICM:-}"
-	add_opt vic_fast_kill   "${FASTKILL:-}"
-	add_opt win_seq         "${WINSEQ:-}"
-	add_opt irq_intx        "${INTX:-}"
-	add_opt enc_sub         "${ENCSUB:-}"
+	add_opt raw_deliver        "${RAWDELIVER:-}"
+	add_opt persistent_h264    "${PERSIST:-}"
 	add_opt h264_frame_divisor "${H264DIVISOR:-}"
-	add_opt win_start_op6   "${OP6:-}"
-	add_opt win_bufs_first  "${WINBUFS:-}"
-	add_opt set_buf_op8     "${OP8:-}"
-	add_opt probe_windows   "${PROBEWIN:-}"
-	add_opt h264_probe      "${H264PROBE:-}"
-	add_opt persistent_h264 "${PERSIST:-}"
-	add_opt raw_bank_probe  "${RAWBANKS:-}"
-	add_opt raw_probe_enc_tail "${RAWTAIL:-}"
-	add_opt raw_probe_allow_30 "${RAW30:-}"
-	add_opt raw_bank_observe "${RAWOBS:-}"
-	add_opt raw_deliver     "${RAWDELIVER:-}"
-	add_opt post_mask       "${POSTMASK:-}"
-	add_opt post_skip       "${POSTSKIP:-}"
-	add_opt post_avg        "${POSTAVG:-}"
-	add_opt mst_win_output  "${MSTOUT:-}"
-	add_opt mst_ad          "${MSTAD:-}"
-	add_opt vic_in_w        "${VICINW:-}"
-	add_opt vic_in_h        "${VICINH:-}"
-	add_opt vic_in_fmt      "${VICINFMT:-}"
-	add_opt vic_b0          "${VICB0:-}"
-	add_opt mst_b1          "${MSTB1:-}"
-	add_opt mst_b2          "${MSTB2:-}"
-	add_opt mst_b5          "${MSTB5:-}"
-	add_opt mst_b0_late     "${B0LATE:-}"
-	add_opt set_buf_opcode  "${SETBUF:-}"
-	add_opt rx_strap        "${RXSTRAP:-}"
-	add_opt poll_drain_credit "${POLLCREDIT:-}"
-	add_opt op6_kick_ms     "${OP6KICK:-}"
-	add_opt kick_opcode     "${KICKOP:-}"
-	add_opt kick_repeat     "${KICKREP:-}"
-	add_opt stream_without_signal "${NOSRC:-}"
-	add_opt signal_monitor_ms "${SIGMON:-}"
-	add_opt no_signal_fps "${NOSIGFPS:-}"
-	# M216: no longer defaulted here. poll_drain_ms is 0 in the driver now,
-	# which is right for the fw=7 completion-ring path; hardcoding 20 here
-	# would silently override the module default, which is exactly what the
-	# add_opt comment above warns against. POLLDRAIN=20 still selects the
-	# legacy fw=5 poll-drain path.
-	add_opt poll_drain_ms   "${POLLDRAIN:-}"
+	add_opt post_skip          "${POSTSKIP:-}"
+	[ -n "${KO:-}" ] && MZKO=$KO
 
 	dmesg -C
-	insmod "$MZKO" dma_handshake=1 enable_dma=1 \
-		enable_video=1 procfs_verbosity=2 dma_iova_remap=1 aic_on=1 \
-		stream_nosg="${NOSG:-0}" force_timings=0 signal_poll_ms=4000 \
-		$OPTARGS ${EXTRA:-} \
-		|| { echo "insmod failed"; exit 1; }
-	echo "insmod:$OPTARGS ${EXTRA:-}"
+	# No quotes inside the dyndbg query: insmod wraps a value containing
+	# spaces in "...", and a nested "mbx " splits it ("unclosed quote: mbx",
+	# and nothing traced). '^' anchors the match to the start of the format.
+	if [ "${TRACE:-0}" = 1 ]; then
+		insmod "$MZKO" $OPTARGS ${EXTRA:-} dyndbg='format ^mbx +p' \
+			|| { echo "insmod failed"; exit 1; }
+	else
+		insmod "$MZKO" $OPTARGS ${EXTRA:-} || { echo "insmod failed"; exit 1; }
+	fi
+	echo "insmod:$OPTARGS ${EXTRA:-}${TRACE:+ (mailbox trace on)}"
 
 	# insmod is synchronous: it returns only after the PCI probe, firmware
 	# handshake, DMA setup, and V4L2 registration have completed.  The old
@@ -257,33 +194,18 @@ load)
 	fi
 
 	echo
-	dmesg | grep -E 'MST3367 signal|firmware|IRQ' | tail -6
+	dmesg | grep mz0380 | tail -6
 	echo
 	echo "=================================================================="
 	echo " node: $NODE   (module stays loaded until you unload it)"
 	echo "=================================================================="
 	echo
-	echo " In OBS: Video Capture Device (V4L2)  ->  device $NODE"
-	echo "   - turn OFF 'Deactivate when not showing'"
-	echo "   - turn OFF 'Use Buffering' for a low-latency preview"
-	echo "   - if the preview stalls, do NOT let it retry in a loop:"
-	echo "     every retry is one encoder spawn out of a budget of ~8-18."
+	echo " ffplay: ffplay -f v4l2 -input_format yuv420p -video_size 1920x1080 $NODE"
+	echo " OBS   : Video Capture Device (V4L2) -> $NODE, Video Format NV12"
+	echo "         turn OFF 'Deactivate when not showing'; avoid retry loops -"
+	echo "         every encoder restart spends one of ~8-18 spawns per power cycle."
 	echo
-	if [ "${H264PROBE:-0}" = 1 ]; then
-		echo " H.264 window-1 capture is enabled. It delivers valid 1920x1080"
-		if [ "${H264DIVISOR:-0}" = 0 ]; then
-			echo " High Profile H.264. Validated all-frame bitmap mode is selected:"
-			echo " a 60 fps HDMI input encodes at approximately 60 fps."
-		else
-			echo " High Profile H.264. Non-zero skip/divisor mode is selected;"
-			echo " divisor 2 produces approximately 30 fps from a 60 Hz input."
-		fi
-	else
-		echo " Expect ONE frame, then a frozen preview, showing the card's own"
-		echo " monochrome NO SIGNAL splash. That is the default raw path."
-	fi
-	echo
-	echo "   sudo ./mz0380-live.sh status    # signal, spawns, last log lines"
+	echo "   sudo ./mz0380-live.sh status    # signal, spawns, counters"
 	echo "   sudo ./mz0380-live.sh watch     # follow the log live"
 	echo "   sudo ./mz0380-live.sh unload    # when you are done"
 	;;

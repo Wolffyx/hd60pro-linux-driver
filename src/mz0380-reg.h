@@ -56,13 +56,8 @@
 
 /* ---- Confirmed SDK-property param fields (correlation-verified) ---- */
 
-#define MZ0380_REG_PROP_INPUT          0x0040  /* mask 0x7    */
-#define MZ0380_REG_PROP_RECORD_MODE    0x0058  /* mask 0x3    */
-#define MZ0380_REG_PROP_BITRATE        0x005c  /* full 32 bit */
-#define MZ0380_REG_PROP_QUALITY        0x0060  /* full 32 bit */
-#define MZ0380_REG_PROP_GOP            0x0080  /* full 32 bit */
-#define MZ0380_REG_PROP_QP_STEP        0x0084  /* full 32 bit */
-#define MZ0380_REG_PROP_B_FRAMES       0x0088  /* full 32 bit */
+#define MZ0380_REG_PROP_INPUT          0x0040  /* VIC route, HDMI = 0 */
+#define MZ0380_PROP_INPUT_MASK         0x7
 
 /* ==================================================================== *
  *  IMPORTANT: the command mailbox and firmware download buffer are NOT
@@ -491,17 +486,6 @@
 #define MZ0380_AUDIO_EVENT_MASK         GENMASK(23, 16)
 #define MZ0380_AUDIO_EVENT_FIFO_SIZE    32
 /*
- * M29: 512 KiB was too small - the card streamed straight past the end of the
- * buffer and the overrun was what produced every IOMMU fault from M26 on (the
- * writes INSIDE the buffer had been succeeding silently all along). 4 MiB is
- * one alloc_pages order-10 block, and comfortably over an uncompressed
- * 1920x1080 NV12 frame (~3.1 MiB) as well as any sane H.264 access unit. The
- * card's outbound aperture is 32 MiB total, so 4 x 4 MiB still fits.
- */
-#define MZ0380_STREAM_BUF_SIZE          0x400000 /* 4 MiB per frame buffer     */
-#define MZ0380_STREAM_BUF_STRIDE        MZ0380_STREAM_BUF_SIZE
-
-/*
  * Windows gives opcode 0x04 (outbound window 1) a separate four-buffer bank
  * for the H.264 encoder.  Its command advertises 0x97f00 bytes per slot; use
  * a 1 MiB backing allocation so the mapping is page/order aligned and leaves
@@ -514,104 +498,27 @@
 /*
  * Windows' HD60 Pro branch gives outbound window 0 two independent four-slot
  * banks.  Both op 0x02 and op 0x08 advertise this exact YUV422 allocation:
- * 2048-byte stride * 1125 lines * 2 bytes + a 4096-byte header.
+ * 2048-byte stride * 1125 lines * 2 bytes + a 4096-byte header. The card
+ * writes I420 frames into bank 0 (M213-M215); bank 1 is registered because
+ * Windows registers it, and is never written.
  */
-#define MZ0380_RAW_PROBE_BANKS          2
-#define MZ0380_RAW_PROBE_NR_BUFS        \
-	(MZ0380_RAW_PROBE_BANKS * MZ0380_STREAM_NR_BUFS)
-#define MZ0380_RAW_PROBE_BUF_SIZE       0x466000
-#define MZ0380_RAW_PROBE_FRAME_SIZE     0x2f7600
-#define MZ0380_RAW_PROBE_BANK0_POISON   0xa5
-#define MZ0380_RAW_PROBE_BANK1_POISON   0x5a
+#define MZ0380_RAW_BANKS                2
+#define MZ0380_RAW_NR_BUFS              (MZ0380_RAW_BANKS * MZ0380_STREAM_NR_BUFS)
+#define MZ0380_RAW_BUF_SIZE             0x466000
+#define MZ0380_RAW_FRAME_SIZE_1080P     0x2f7600
+#define MZ0380_RAW_BANK0_POISON         0xa5
+#define MZ0380_RAW_BANK1_POISON         0x5a
+/* M226: what the card clears a slot to before it fills it (black). */
+#define MZ0380_RAW_CLEAR_LUMA           0x01
+#define MZ0380_RAW_CLEAR_CHROMA         0x80
 
 /*
- * M36/M37 (proven on hw): the fake-frame path lands ONE fully contiguous raw
- * burst of exactly 1920 x 1107 x 1.5 bytes (0x30a5c0) in buf0 within 450 ms
- * of START, then the card's encoder loop parks (M39: a fresh spawn yields
- * exactly one more frame).
- *
- * M50 (decoded from a delivered capture): the burst SIZE is 1920x1107-based,
- * but the PICTURE inside is NV12 720x1080 - the fake-frame renderer draws
- * its "NO SIGNAL" splash (spinner + text, 0x11 background) at 720 wide no
- * matter what width SET_VIC carried. Layout: Y 720x1080 @0, UV 720x540
- * @0x11cc40*2/3 (=0xbdd80, all 0x80 = neutral chroma), 0xff junk fill to
- * the end of the burst. So the deliverable payload is the leading 0x11cc40
- * bytes.
+ * The card only latches the HIGH 32 bits of a DMA target (M25/M26), so every
+ * slot of every window sits at its own 4 GiB-aligned IOVA, dma_iova_base +
+ * (index << 32). Indexes 0..3 belonged to the retired legacy stream buffers
+ * and stay unused so the layout matches every earlier run.
  */
-#define MZ0380_STREAM_RAW_WIDTH         1920
-#define MZ0380_STREAM_RAW_HEIGHT        1107
-#define MZ0380_STREAM_RAW_FRAME_SIZE \
-	(MZ0380_STREAM_RAW_WIDTH * MZ0380_STREAM_RAW_HEIGHT * 3 / 2)
-#define MZ0380_NOSG_NV12_WIDTH          720
-#define MZ0380_NOSG_NV12_HEIGHT         1080
-#define MZ0380_NOSG_NV12_SIZEIMAGE \
-	(MZ0380_NOSG_NV12_WIDTH * MZ0380_NOSG_NV12_HEIGHT * 3 / 2)
-
-/*
- * Disproven guesses (absent from the ep.ko dispatcher): SET_AIC=0x11,
- * QUERY_SIGNAL=0x20. There is no card->host signal query.
- */
-#define MZ0380_CMD_RESET                0xFF  /* CHECKME */
-
-/* ====================================================================
- *  Interrupt status/mask (CHECKME)
- *
- *  ep.ko references "pciep_isr_clrint" and "msi_enable" but the host-
- *  visible interrupt register layout is not yet known. Hypothesised
- *  block lives in BAR0 above the HDMI status window.
- * ====================================================================
- */
-
-#define MZ0380_REG_IRQ_STATUS           0x0100  /* CHECKME (BAR0) */
-#define MZ0380_REG_IRQ_MASK             0x0104  /* CHECKME (BAR0) */
-#define MZ0380_REG_IRQ_ACK              0x0108  /* CHECKME (BAR0) */
-
-#define MZ0380_IRQ_CMD_COMPLETE         BIT(0)
-#define MZ0380_IRQ_VIDEO_RING_READY     BIT(1)
-#define MZ0380_IRQ_AUDIO_RING_READY     BIT(2)
-#define MZ0380_IRQ_SIGNAL_CHANGE        BIT(3)
-#define MZ0380_IRQ_FW_READY             BIT(4)
-#define MZ0380_IRQ_ERROR                BIT(5)
-
-/* ====================================================================
- *  Ring base/size/head/tail (legacy mailbox - kept for now)
- *
- *  Two conflicting models:
- *    Model A (mailbox):  ring base programmed via BAR5 0x0200..0x0234.
- *                        Card pushes 4 KiB-aligned descriptors of the
- *                        custom flags+len+pts format below.
- *    Model B (XDMA):     an sc0710-style Xilinx XDMA descriptor table.
- *                        DISPROVEN and its definitions deleted - this card
- *                        has no host-visible XDMA controller.
- *
- *  Model A is what the bring-up scaffolding in mz0380-dma.c uses. The real
- *  streaming path is neither: it is the mailbox plus the outbound windows.
- * ====================================================================
- */
-
-#define MZ0380_REG_VIDEO_RING_BASE_LO   0x0200  /* CHECKME (BAR5) */
-#define MZ0380_REG_VIDEO_RING_BASE_HI   0x0204
-#define MZ0380_REG_VIDEO_RING_SIZE      0x0208
-#define MZ0380_REG_VIDEO_RING_ENTRIES   0x020c
-#define MZ0380_REG_VIDEO_RING_HEAD      0x0210
-#define MZ0380_REG_VIDEO_RING_TAIL      0x0214
-
-#define MZ0380_REG_AUDIO_RING_BASE_LO   0x0220  /* CHECKME (BAR5) */
-#define MZ0380_REG_AUDIO_RING_BASE_HI   0x0224
-#define MZ0380_REG_AUDIO_RING_SIZE      0x0228
-#define MZ0380_REG_AUDIO_RING_ENTRIES   0x022c
-#define MZ0380_REG_AUDIO_RING_HEAD      0x0230
-#define MZ0380_REG_AUDIO_RING_TAIL      0x0234
-
-/* Per-entry descriptor in our Model A ring (CHECKME) */
-#define MZ0380_DESC_FLAGS_OFFSET        0x00
-#define MZ0380_DESC_BYTECOUNT_OFFSET    0x04
-#define MZ0380_DESC_PTS_LO_OFFSET       0x08
-#define MZ0380_DESC_PTS_HI_OFFSET       0x0c
-#define MZ0380_DESC_PAYLOAD_OFFSET      0x14
-
-#define MZ0380_DESC_FLAG_KEY_FRAME      BIT(0)
-#define MZ0380_DESC_FLAG_END_OF_STREAM  BIT(1)
-#define MZ0380_DESC_FLAG_ERROR          BIT(2)
+#define MZ0380_H264_IOVA_INDEX          4
+#define MZ0380_RAW_IOVA_INDEX           8
 
 #endif /* _MZ0380_REG_H_ */

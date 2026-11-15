@@ -1,4 +1,11 @@
 #!/bin/bash
+# ARCHIVED - DO NOT RUN. Added when this file was archived (see ../README.md).
+# The first stage of this script (pm reset) hung the X570 chipset and took the
+# whole host down (RE_FINDINGS M249). A wedged card is recovered by removing
+# power only. Everything below is kept unchanged as a record of the experiment.
+echo "archived: this script PCI-resets the card, which crashed the host (M249). Not running." >&2
+exit 1
+
 # M52: can a wedged card be recovered WITHOUT a mains-off cold boot?
 #
 # The wedge (hit after ~8-18 encoder spawns): the card's mailbox stops ACKing

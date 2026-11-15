@@ -15427,3 +15427,526 @@ the non-zero case: that a source WITH audio produces the expected samples
 (channel order, endianness). Test with a PC or console output when one is
 available. The competing-daemons caveat stands for any future audio run: cold
 boot first, because each audio-enabled load leaves another capture app running.
+
+## M247 (2026-10-12): the cleanup - 21k lines to 10k, the card told the same thing, and the UX gaps closed
+
+Not a discovery: a consolidation, so that the next one has less to read. Two
+independent read-only audits checked it before any hardware ran.
+
+**What went.** Every path the default configuration never reaches: the nosg
+fake-frame path and extent watcher, the legacy fw=5 poll-drain and the
+stream_bufs window-0 registration (never given to the card since M211), the
+M209-M212 raw-bank discriminators, the BAR5 "property experiment" machinery and
+`/proc/mz0380-experiment|-control|-snapshot|-scan|-periph-scan|-events|-cardlog|
+-buf0|-cmd`, the MST3367 wscan/ramtest/edidhunt/bit-bang tools, the RE "mailbox
+scan" that ran on a CMD_INIT failure, and ~50 harness scripts for closed
+milestones. Module parameters went from 148 to 17; each card-facing knob became
+a constant at its single point of use, holding the value every run since M216
+used. This reverses the M245-era note "mark deprecated rather than delete" -
+the operator chose deletion; git history keeps everything.
+
+**What the card is told is unchanged.** A command-by-command audit against HEAD
+(4a5c270) found every opcode, parameter word, timeout and BAR write on the
+default path identical and in the same order - SET_VIC
+`{06073c00 04380780 0 02010101 0 04380780 1 0 80800000}` for 1080p60, SET_ENC
+main `{3fff 203c0000 18 00400000 ...}` and sub `{3fff 1e3c0100 18 003d0900 ...}`,
+SET_PREVIEW `{01|00 00003c00 00010001 0 0}`, SET_AIC
+`{00100002 0000bb80 00040100 00000101}`. The intended differences are all
+removals: no BAR5 sync/trace reads at probe, no dir_invert=0 reset pass (every
+archived log failed it and retried with 1), no 0xae / HPD GPIO / 0xb7
+read-backs, no output-diag burst after STOP, no hactive reads per measurement,
+no output-stage re-commit for an unchanged mode, no full receiver measurement
+for an idle ENUMINPUT. `insmod mz0380.ko dyndbg='format ^mbx +p'` now logs one
+line per mailbox command, and `scripts/mz0380-m247-verify.sh` diffs that trace
+between `ko/baseline/mz0380.ko` (HEAD + the trace) and this tree on hardware.
+
+**Defects found and fixed on the way:**
+
+- **M238 was half right.** The chroma test sampled U and V as one region and
+  passed a slot as soon as one sample had colour - so U written with V still
+  clear passed, which is the green/magenta cast frame, and is exactly the
+  16/32 high-water mark M244 kept reporting. V is written last, so V decides
+  now. And a slot whose V is uniformly 0x80 - a black, grey or navy screen -
+  was held back forever, freezing raw capture on the frame before a fade; it
+  is now delivered once it has read that way for one frame period (a fill
+  completes within one). Counter: `colourless frames passed on a second look`.
+- **The M222 tear check never fired.** It required all four sentinels to be
+  rewritten during a ~1 ms copy, i.e. the card rewriting the bottom half of a
+  frame; any one changing now discards the frame.
+- **Raw nodes had no NO SIGNAL picture** (M225 withheld the H.264 one and let
+  the queue stall, which browsers and conferencing apps treat as a dead camera
+  after ~10 s). A black frame with NO SIGNAL lettering is rendered at the
+  negotiated geometry at 2 fps once live raw frames have been absent for 1 s.
+- **An unsupported fourcc in S_FMT switched the node to H.264** and marked the
+  encoder for replacement - one spawn for asking for YUYV. It keeps the current
+  format now. Replacement is decided by comparing against what the running
+  pipeline was started with, so toggling a setting and back, or changing the
+  H.264 bitrate while delivering raw, no longer spends a spawn.
+- **Idle ioctls** (ENUMINPUT, QUERY_DV_TIMINGS) did a full receiver measurement,
+  polling up to 2 s under the device lock with no source; one R55 read now
+  answers an unlocked receiver.
+- **Stale state after the application closed:** with the persistent pipeline
+  detached the monitor stops, so lock was reported until the next STREAMON.
+  The detached drain's frame clock now says whether the source is there.
+- **One S_DV_TIMINGS (v4l2-compliance runs one) relabelled every later frame
+  interlaced/progressive for the module's lifetime;** it is undone at last close.
+- **ENUM_DV_TIMINGS listed 640x480 and 576p,** which detection can never report;
+  it lists the 11 modes the receiver recognises.
+- **The signal monitor's busy loops:** a pending replacement with the producer
+  alive re-measured (~30 commands + a log line) every 500 ms; an unsupported
+  mode kept the mailbox ~80 % busy; a silent producer alternated measurements
+  and logs forever. Now 2 s, 3 s with an early exit, and once per silence.
+- **After S3 resume, SET_AIC was never re-sent** (aic_armed survived a card that
+  cold-booted), so the encoder would complete no frames (M33).
+- **INTx was unmasked before the handler existed,** and left unmasked after a
+  failed DMA setup.
+- **NV12** chroma interleave eight bytes at a time instead of one; YU12 one copy
+  instead of two; raw frames are timestamped before their copy; the H.264 NAL
+  walk is one pass that stops at the first slice (the M212 reference stream
+  confirms SPS/PPS always precede it).
+
+**User-facing:** dmesg is a handful of lines per load and one per real event
+(`HDMI signal: 1920x1080p@60`, `HDMI signal lost`, `encoder started ... spawn N`);
+`v4l2-ctl --log-status` prints signal, format, encoder and spawn state; the
+Makefile builds each kernel with the compiler that built it (the gcc 6.18 LTS
+kernel failed under clang); `make install` no longer builds as root; DKMS copies
+only sources and re-installs cleanly.
+
+**Not yet run on hardware.** Prediction for `scripts/mz0380-m247-verify.sh`:
+the baseline and M247 traces carry identical 0x29/0x2d/0x31/0x02/0x08/0x04/0x2a/
+0x06/0x07 commands; the diff is receiver reads only (fewer in M247);
+v4l2-compliance passes; YUYV TRY_FMT returns YU12; unplugging during a raw
+capture raises `raw NO SIGNAL frames delivered` and replugging ends it with no
+new spawn. Historical docs moved to `docs/history/`.
+
+## M248 (2026-10-12): the first M247 run - an empty trace, compliance without a source, and the camera that leaves at every load
+
+First run of `scripts/mz0380-m247-verify.sh` (3 spawns, power cycle total 3).
+What passed: both modules delivered 300/300 raw frames with no drops, the
+pictures match (frame means Y 74-84, U 127-128, V 130-131 on both, frames
+changing), and the unplug/replug check behaved as
+predicted - `raw NO SIGNAL frames delivered` 15 while unplugged, placeholder
+`not shown` after replug, spawns unchanged. M247 needed 0 stub skips and 0
+luma-clear skips where the baseline needed 1 and 4.
+
+Three things did not:
+
+**1. Phase 1 proved nothing: both traces were empty.** `dyndbg: unclosed
+quote: mbx` and `unknown parameter ' +p' ignored` at both loads. insmod wraps
+a parameter value that contains spaces in `"..."`, so
+`dyndbg='format "mbx " +p'` reached the kernel as `dyndbg="format "mbx " +p"`,
+which the parameter parser splits at the inner quote. The query is now
+`dyndbg='format ^mbx +p'` (no inner quotes; `^` anchors the match) in
+`mz0380-live.sh`, the README and the mailbox.c comment. The script also
+follows the log with `dmesg -w` for each traced load: a full trace does not
+fit the 128 KiB ring (`CONFIG_LOG_BUF_SHIFT=17`), and the bring-up lines would
+have been the first overwritten.
+
+**2. v4l2-compliance: 3 failures, one cause.** The run happened with no
+source - the camera had left HDMI mode at load (point 3) and came back 7 s
+later, after the test. `checkTimings` (v4l2-test-io-config.cpp:239 in 1.32)
+saves G_DV_TIMINGS, sets every enumerated timing, then restores the saved
+one. With nothing ever detected, G returned the empty `mz0380_no_signal`,
+S_DV_TIMINGS rejected it with EINVAL, and the test stopped right there - with
+the last enumerated timing, 720x480, still set and before its QUERY could
+clear the startup source geometry. So G_FMT said 720x480 while TRY/S_FMT
+snapped to the 1920x1080 "source", which is the two format failures.
+Fixed twice over:
+- G_DV_TIMINGS answers `mz0380_default_timings` (1080p60, the capture's
+  startup geometry) until a source is detected or a timing is set, and again
+  when the last handle closes with no source. QUERY still says ENOLINK.
+- TRY/S_FMT take their geometry from timings the application set itself before
+  the detected source (M172 said the format follows S_DV_TIMINGS; M223 then
+  let the source override it). A set timing that differs from the source is
+  still refused at STREAMON (`mz0380_check_geometry`).
+M243's "compliance clean" was measured with a source present, which is why
+this never showed.
+
+**3. Every module load cost the source.** Operator report: the DSLR leaves
+HDMI mode at every driver load, and may not come back. Every load ran the full
+bring-up: receiver reset (pin9 1->0->1), init with HPD parked off, the EDID
+push, then HPD on - about half a second of hot-plug low, which a camera reads
+as an unplug. `live.sh load` also runs the smoke test first, so it was two
+unplugs per load. On this run the camera took 3 s (m247 load) and 7 s
+(phase 2 load) to come back.
+
+Nothing in the unload path touches the receiver or the GPIOs, so after a
+reload the receiver still holds everything the previous load set. Bring-up now
+reads four BANK0 values only its own init leaves and nothing rewrites
+(`ad=05 b4=54 51=89`, all read back on hardware in M43/M101, and `b7=00`, HPD
+asserted, the last step). All four match: keep the receiver, no reset, no
+GPIO write, no hotplug; log `HDMI receiver kept from the previous load`. Any
+mismatch, including the all-zero reads of a receiver still in reset after
+power-up, takes the full path as before. Either way the cached mode is
+dropped, so the first lock commits and latches the output stage again. The
+first load after a power-up still resets the receiver - unavoidable, it powers
+up held in reset - and so does every load of the baseline module.
+
+Not explained, not chased: after the replug, dmesg had `signal back`, then
+`signal lost` 6 s later, then `back` 8 s after that. The monitor writes
+nothing to a locked receiver (M233), so this looks like the camera
+renegotiating.
+
+Verify script reworked for the next run: this tree's traced load goes first
+(cold, like the baseline's), phase 2 checks the receiver was kept at both
+loads and how fast the source locks, runs v4l2-compliance with the source and
+again with it unplugged, and prints `!!` for every failed expectation.
+
+### M248 run 2 (same power cycle, no cold boot; spawns 3 -> 6)
+
+- **Receiver kept at every load of this tree** - m247 phase 1 and both phase 2
+  loads (smoke + real). The trace shows the whole cost: one bank select and
+  four reads (`ad b4 51 b7`), then nothing until the capture. HDMI signal
+  logged 0.2 s after `registered video0`; with the reset it had been 3-7 s.
+- **Encoder commands identical** to the baseline (HEAD): 0x29 0x2d 0x31 0x02
+  0x08 0x04 0x2a 0x06 0x07 match in count and arguments. The other 357 lines
+  of the diff are the baseline's bring-up (GPIO 0x14/0x15/0x17, I2C 0x1a/0x1b,
+  EDID 0x1e/0x1f), which this tree skipped because the receiver was kept - so
+  the cold bring-up of this tree is still untraced (needs a cold boot).
+- The baseline's cold bring-up held HPD low 0.53 s and its source was back
+  1.0 s after HPD rose. The camera is not consistent about it (3-7 s in run 1).
+- **v4l2-compliance 48/48 with the source, and 48/48 with it unplugged.**
+- NO SIGNAL across an unplug: 15 raw NO SIGNAL frames while unplugged, 45 by
+  replug, `not shown` after it, spawns unchanged. One clean lost/back pair this
+  time - the extra drop of run 1 did not recur.
+- **The YUYV check has never reached the driver, in either run.** v4l2-ctl
+  looks the fourcc up in ENUM_FMT itself and stops with "The pixelformat
+  'YUYV' is invalid" before any ioctl (`vidcap_get_and_update_fmt`,
+  v4l2-ctl-vidcap.cpp, 1.32); the one `Pixel Format: 'YU12'` line in both runs
+  came from `--get-fmt-video`. Run 1's "pass" was a misread. The script now
+  issues TRY_FMT and S_FMT itself (`fourcc_check`, python fcntl), tested
+  against a mock that keeps the format and one that flips it to H.264.
+
+### M248 run 3: the YUYV check, at last on the driver (zero spawns)
+
+The first try read `format H264 before, H264 after` - OBS had been started
+right after the load, set H.264 and spent the encoder spawn (power cycle total
+now **7**). That proves nothing: the pre-M247 bug also answered H.264. From
+YU12 (S_FMT only, no streaming): YUYV and MJPG both gave `TRY_FMT -> YU12,
+S_FMT -> YU12`, format YU12 1920x1080 before and after, spawns unchanged.
+**M247's unsupported-fourcc fix holds.** `fourcc_check` now sets YU12 itself
+first and restores the original format afterwards, so whatever an application
+left behind cannot make it pass; a mock of the pre-M247 driver starting from
+H.264 is flagged.
+
+## M249 (2026-10-14): a deaf card on the first load, and a PCI reset that took the host down - NEVER PCI-reset this card
+
+**The deaf card.** After the M248 commit the machine was powered down and
+booted on a new kernel package (`7.2.9-2-cachyos`; every working session ran
+`7.2.0`/`7.2.9-1`). The first load of the boot - the verify script's, before any
+capture - got `CMD_INIT got no answer after 22 attempts/15468ms (-110)` with
+`bar5[30]=fc200004 bar5[38]=fc20005f`: byte for byte the M149 deaf-mailbox
+signature. The previous power cycle had ended at 7 spawns with OBS's H.264
+encoder still running. Two explanations remain and are not yet separated: the
+wedge survived a power-down that did not remove slot standby power (M120), or
+the card does not answer under `7.2.9-2`. Every load on `7.2.9-2` so far has
+been deaf; none has answered.
+
+**The verify script hung on it.** It never checked the handshake: capture 1 was
+refused (`cannot stream: card handshake failed`), capture 2 stalled, the run was
+killed and left its `dmesg -w` follower behind. Fixed: after every load the
+script greps the kernel log for `card handshake failed` / `CMD_INIT got no
+answer` (both this tree and the baseline print them), stops with `!!` and the
+recovery advice; every v4l2-ctl / v4l2-compliance call has a `timeout`; the
+follower is killed on any exit.
+
+**The PCI-reset recovery crashed the host.** M157's plan - "walk pm reset ->
+bus reset -> remove+rescan while wedged, worth exactly one run" - was revived
+as `mz0380-card-recovery.sh`. It checked that the card was alone behind its
+bridge (it is: `03:01.0`) and in its IOMMU group (24). It did not see that
+`03:01.0` is a downstream port of the **X570 chipset**, whose single uplink
+(`00:01.2` -> `02:00.0`) also carries the Samsung NVMe (`05`), Wi-Fi (`06`),
+RTL8125 (`07`), I211 (`08`), chipset USB (`09`) and both SATA controllers
+(`0a`, `0b`). Stage 1, the PM reset (D0 -> D3hot -> D0 on `04:00.0`), at
+~2433 s:
+
+    2436  xhci_hcd 0000:09:00.1: xHCI host controller not responding, assume dead
+    2438  igb 0000:08:00.0 enp8s0: PCIe link lost
+    2440  ata3: failed to resume link (SControl FFFFFFFF)
+    2451  r8169 0000:07:00.0 enp7s0: NETDEV WATCHDOG: transmit queue 0 timed out
+
+with GPU fence timeouts alongside - the whole chipset fell off the bus and the
+system stalled. Root btrfs (on the CPU-attached NVMe) replayed its tree-log on
+the next boot, no errors. The bus-reset and remove+rescan stages never ran.
+
+So: **a wedged MZ0380 must not be PCI-reset on this board** - not by `reset`,
+`reset_method`, setpci power states, or remove/rescan - and a driver must never
+try it either. Whether it is the D3hot transition of a card whose firmware is
+gone, or something the chipset port does with it, the cost is the host. The
+script is deleted; the M157 plan is closed. Recovery stays what it was: remove
+power (PSU switch or mains, wait 30 s).
+
+### M249 resolved: it was the wedge, not the kernel - and the cold bring-up is traced
+
+After the crash the machine was off for 17 minutes. The next verify run, still
+on `7.2.9-2`, passed with no `!!` lines - so the kernel is cleared, and the deaf
+card of the earlier boot was the previous power cycle's wedge surviving a
+power-down that did not clear it. (Spawns before that run: 0; after: 3.)
+
+**Phase 1, cold against cold.** This tree's load had no `kept` line and traced
+290 commands (its full bring-up) against the baseline's 457. Encoder commands
+identical in count and arguments. The 168 baseline-only lines, all accounted:
+- GPIO: HEAD's first reset pass with the wrong GPIO_DIR sense (DIR on pins
+  1/3/8/9, pin3=1, pin9 1->0->1, pin8=0) and its two HPD read-backs (`0x14`) -
+  M247 removals.
+- I2C: 41 bank selects; two extra output-stage commits (`ab=95/15 b0=21 b2=00`,
+  BANK2 `07=14/04` latch) - M247 stopped re-committing an unchanged mode; and
+  `e2=80/00` (AUTO_POSITION) with `0x55` polls - HEAD measured an unlocked
+  receiver after its own hotplug edge, M247 reads the lock byte and returns.
+  That share depends on how long the camera takes to come back.
+- The one M248-only line is the `0xad` read that finds the signature missing
+  on a powered-up receiver.
+
+**Phase 2:** receiver kept at 2 of 2 loads, lock at the first query after
+load, v4l2-compliance 48/48 with the source and 48/48 without, YUYV keeps YU12
+(from a YU12 start), NO SIGNAL 14 frames while unplugged, 35 by replug, no new
+spawn.
+
+
+## M250 (hardware, 2026-10-14): a black screen through raw capture - no freeze, but the DSLR's black never reaches the neutral path
+
+`scripts/mz0380-m247-black-test.sh` (new): one 30 s raw capture piped into a
+scanner that records, per frame, its arrival time, mean Y/U/V and how many of
+the driver's own 16 V-plane sample dwords read exactly `0x80808080` - 16/16 is
+what takes the M247 neutral path. Tested offline first against a synthetic
+stream that keeps flowing through an exact-neutral black and one that stops
+(the M238 regime: flagged as a 699 ms gap). One spawn (power cycle total 4).
+
+Hardware, the DSLR going black (lens covered) twice and back:
+
+- **No freeze.** 30 frames in every one of the 30 seconds, 900 delivered,
+  0 dropped, 0 repeated frames; mean Y followed the source (20 on black, 75-136
+  on content).
+- **The black never looked like a cleared slot.** Mean V 128.8 on black; at
+  best 9 of 32 chroma samples read exactly 0x80 (M244's 11/32 again), so no
+  frame was 16/16 and `colourless frames passed` stayed 0; no chroma-clear
+  deferrals either. This camera's black carries sensor noise in chroma, so it
+  could never have frozen M238 - the freeze needs a digitally exact neutral
+  picture. **The M247 path is still not exercised on hardware.** It needs a
+  digital black: a laptop/phone over HDMI showing a full-screen black image,
+  or a camera playing back a black picture.
+
+Run 2, the camera PLAYING BACK a photo taken with the lens cap on: Y 20.1,
+V 128.8, best 10/32 exact samples - statistically the live lens-cap black
+again, because the photo recorded the same sensor noise. Still 30 fps every
+second, 900/900, no repeats, and the 66 ms pair in every second again. A
+camera cannot produce an exact neutral; the source has to be digital (a
+computer or console). Power cycle total 5.
+
+### Run 3: the GPU as a digital source - **M247 holds on hardware**
+
+The RX 6800 XT's free HDMI port looped into the card (KDE sees a third
+screen at 1920x1080@60); black = `mpv --fs av://lavfi:color=c=black`. One
+spawn, power cycle total 6.
+
+- **219 frames had all 16 V samples exactly 0x80, and `colourless frames
+  passed` rose by exactly 219.** 322 chroma-clear deferrals: each neutral
+  slot was held one frame period, then delivered. 60 fps through the whole
+  black, max gap 33 ms, 1800/1800 delivered, 0 dropped. The M238 regime would
+  have delivered none of the 219 - a 4 s freeze on the last desktop frame.
+- The neutral run stops partway into second 12 and Y moves 11.0 -> 11.7:
+  something was drawn on the black (mpv's controls or the pointer), so V was
+  no longer exact and the frames passed on the first look. Correct.
+- **RGB black arrives at Y = 11**, below video black (16), with Cb = Cr =
+  128 exactly. Either the MST3367 CSC carries a luma offset ~5 codes low for
+  RGB input, or the GPU's RGB range (full vs limited) and the CSC disagree.
+  Colour-accuracy lead for PC/console sources; the DSLR (YCbCr) black was 20.
+- At second 25 the source went from 60 to exactly 50 fps (intervals 16.7 ->
+  20.0 ms) - a refresh change on the GPU side. Every frame was still
+  delivered, but the driver did not notice: the monitor leaves a receiver
+  alone while frames flow, so a refresh-only change keeps the old frame
+  interval in G_PARM. Low priority.
+
+**New lead - an 8-frame delivery cadence.** Arrival intervals: 674 at ~33 ms,
+and every 8th frame a pair - one at ~0 ms followed by one at ~66 ms (113 and
+112 of them, at frames 6/7, 14/15, ...). The average is exactly 30.003 fps and
+nothing is lost, but one frame in eight arrives a frame early and the next a
+frame late: judder in a player that shows frames as they come. The same
+scanner on a synthetic 30 fps stream gave even ~33-41 ms spacing, so this is
+the driver or the card, not the measurement. Raw delivery runs on the ENCODED
+completion and takes at most one slot per completion (M223); 8 = two passes
+over the four slots. Run 3 shows it at 60 fps too: intervals repeat
+`1, 32, 17, 17, 17, 17, 17, 17` ms. With the camera every frame was distinct
+(0 repeats), so the frame that arrives 1 ms after its predecessor is a NEW
+frame a period early, not a duplicate - the delivery clock, not the pipe
+(a pipe can only delay). Next: the driver's own vb2 timestamps (`v4l2-ctl -v`
+with the frames to a file, not stdout) to see whether the cadence is in the
+completion events or in the slot scan.
+
+## M251 (static, 2026-10-14): the 8-frame delivery rhythm - a counter that decides where it comes from
+
+M250's arrival data, re-read frame by frame: the frame that arrives ~1 ms after
+its predecessor is **always index 7 mod 8** (225 of 1800 at 60 fps; the same
+period at 30 fps), and at every content switch in the GPU run the sequence
+moves forward only - no early frame shows older content than the one before
+it. So it is not a stale slot from the previous round of four. With the camera
+no frame was ever a repeat, so it is a new frame, delivered right behind its
+predecessor, followed by a two-period gap.
+
+How delivery works: every card video event is snapshotted in the IRQ
+(`mz0380_handle_event_snapshot`), queued, and the drain worker handles every
+queued event in one run; each event scans the four raw slots and takes at most
+one ready slot, round-robin (M223). Two causes fit the arrival data, and they
+need different fixes:
+
+- **A - the card's events already have the rhythm** (one event in eight fires
+  right behind its predecessor). The driver can only follow; the fix is the
+  vb2 timestamp (stamp from the event/frame clock rather than take time) so a
+  player that paces by timestamp shows it smoothly.
+- **B - the events are even and the delivery is not**: a one-frame backlog
+  (two slots ready at most scans, one taken per event) drained by a batched or
+  extra scan every eighth event. Fix in the drain.
+
+Counter added (`/proc/mz0380-state`, `raw rhythm`, reset per capture): spacing
+histograms in frame periods (<.25 / .5 / 1 / 1.5 / 2 / >2.25) of the card's
+video events (IRQ time) and of the raw frames taken (the vb2 timestamp), slots
+ready per scan (0-4), and events handled per drain run (1/2/3+). The verify and
+black-test scripts print it, with the existing `raw repeats` line (completions
+with >1 slot ready), which the M250 runs did not print.
+
+Predictions, written before any run (any raw capture of >= 600 frames):
+- **A:** card events ~1/8 in `<.25` and ~1/8 in `2`; frames taken the same;
+  slots ready per scan almost always 1; events per drain mostly 1 (a 2 if the
+  close pair is batched).
+- **B:** card events almost all in `1`; frames taken show ~1/8 in `<.25` and
+  ~1/8 in `2`; slots ready per scan mostly 2; events per drain with ~1/8 at 2.
+- Either way, frames taken `<.25` ~ 12% (1/8) of the total, as measured.
+
+## M252 (static, 2026-10-14): the MST3367 CSC format cracked - RGB sources get a +10 luma lift and clipped whites
+
+M250's GPU run put RGB black at **Y = 11** (video black is 16). Answer, from the
+HD60 Pro Windows driver's own CSC writer (`e60MZ0380.X64.SYS` FUN_14024c894 and
+its 16-bit helper 0x140274aec: `reg+1 = lo`, `reg = (v >> 8) & 0x7f`):
+
+- Every coefficient and offset is **15-bit two's complement, big-endian, 4096 =
+  1.0**; offsets in **1/64 code** (0x2000 = 128).
+- Layout grouped by INPUT: R at 0x93/0x95/0x97, G at 0x99/0x9b/0x9d, B at
+  0x9f/0xa1/0xa3, each [Cr, Y, Cb]; offsets Cr 0xa5, Y 0xa7, Cb 0xa9. The
+  `M11..M33` labels in our source do not describe it.
+- **Checked independently of the disassembly:** under this encoding our table
+  decodes to Y = 0.2122R + 0.7122G + 0.0720B, Cr = 0.5005R - 0.4548G -
+  0.0457B, Cb = -0.1152R - 0.3853G + 0.5005B - BT.709 to three decimals
+  (0.2126/0.7152/0.0722), both chroma rows summing to exactly 0. A wrong guess
+  does not land on BT.709.
+- Offsets: Cr 128.0, **Y +10.02**, Cb 128.016. So the table is a FULL-SWING
+  BT.709 matrix plus a 10-code luma lift: RGB 0 -> Y 10, RGB 255 -> 264,
+  clipped to 255 (the top ~9 codes of highlights are lost). Measured 11 fits a
+  full-range source whose black is 1 (dither); a limited-range source would
+  read 26. Chroma 128 exactly on any grey: consistent (truncation, not
+  rounding - Cb's 128.016 shows as 128).
+
+Corrections to this file:
+- M130's "the coefficient fixed-point format is NOT cracked" - superseded.
+- M127's "36-byte CSC table at 0x92..0xb5" - it is **31 bytes, 0x92..0xb0**.
+  Its tail rewrites 0xab..0xb0, including **0xae = 0x20** - which is exactly
+  why M101 saw "bit 2 does not stick": our own table cleared it right after
+  RxVideoInit set it, not the hardware.
+
+The node is labelled limited range (V4L2 default, `raw_full_range=0`), so the
+right output is 16-235. Candidates (bytes for 0x93..0xaa; 0x92 = 0x40):
+- **A, full RGB -> limited BT.709:** `07 07 02 EC 7E 64 79 9E 09 D4 7A 95
+  7F 5B 00 FE 07 07 20 00 04 00 20 00` - every byte recomputed here from the
+  BT.709 constants (x219/255 luma, x224/255 chroma, Y offset 16 = 0x0400).
+  Full input: black 16, white 235.
+- **B, limited -> limited (the Windows default, offset 0):** `08 2D 03 66 7E 21
+  78 94 0B 71 79 B3 7F 40 01 27 08 2D 20 00 00 00 20 00`.
+- **C, select by what the source declares**, as Windows does: AVI InfoFrame
+  Q1:Q0 = BANK2 0x4a bits 3:2 (next to 0x48's colour format) - full -> A,
+  limited -> B, default -> to be decided by measurement.
+YCbCr sources (the DSLR; 0x92 = 0 bypass) are unaffected by any of them.
+SD modes use BT.601 tables in Windows (0x1402d58d8).
+
+Not changed yet - measure first. The driver now reads 0x4a with 0x48 and
+`/proc/mz0380-state` prints `RGB range default/limited/full`; the new
+`scripts/mz0380-m252-range-test.sh` drives the GPU loop through KDE's RGB range
+automatic/full/limited (kscreen-doctor, mpv pattern half black/half white,
+all automatic) and measures black and white separately - and its first capture
+is long enough for the M251 rhythm counter. Predictions with the current
+table: full -> black ~10-11, white 255; limited -> black ~26, white ~244;
+chroma 128 everywhere; 0x4a shows the range KDE selected if amdgpu signals it.
+
+## M253 (hardware + fix, 2026-10-14): M251 resolved - the driver's rhythm is even; M252 confirmed to the code, and the RGB matrix replaced
+
+`scripts/mz0380-m252-range-test.sh`, GPU HDMI looped into the card, one spawn
+(power cycle total 7).
+
+**M251 - the 8-frame rhythm is not in the driver or the card.** 900-frame raw
+capture at 60 fps: card events by spacing `0/0/901/1/0/0` (all but one exactly
+one period), frames taken `0/0/898/1/0/0`, events per drain run 903 x 1 (never
+batched). The vb2 timestamps an application sees are even. M250's 1-in-8 pair
+came from the measurement path - v4l2-ctl writing 3 MB frames into a pipe read
+by a Python scanner: a consumer running one frame behind that periodically
+catches up makes a frame look early. M250's "a pipe can only delay, so it is
+not the pipe" was wrong; retracted. Slots ready per scan were 2 in 623 of 903
+scans - this pattern is all exactly-neutral (black/white), so every slot took
+M247's one-period second look: one frame of extra latency on purely neutral
+content, by design.
+
+**M252 - the decode predicts the hardware exactly.** Black/white halves of an
+mpv pattern, KDE RGB range per phase:
+
+    automatic  black Y 11   white Y 254   Cb = Cr = 128
+    full       black Y 11   white Y 254
+    limited    black Y 26   white Y 244
+
+Predicted 10-11/255 and 26/244. White stops at 254, not the table's 264: the
+BT.1120 bus reserves 0 and 255 for timing codes. The GPU declared **Q = default
+in all three** (`0x4a = 0x80`: IT content, no range), and "automatic" = full.
+
+**Fix:** `mz0380_mst3367_apply_csc_mode` now writes an RGB matrix at stream
+start (and on `/proc/mz0380-hdmi csc`) before enabling the CSC, chosen by the
+declared range - limited -> limited->limited, full or undeclared -> full->limited
+- and by mode (BT.601 for SD, as the node's colorspace label says). Tables
+generated from the BT.709/601 constants (M252 has the bytes; the BT.709
+full->limited one equals candidate A byte for byte; the limited->limited ones
+sum luma to exactly 4096, so 16 -> 16 and 235 -> 235, where Windows' default
+gives 15.99). YCbCr sources keep the bypass. `/proc` names the table. The
+cached path also selects BANK0 before writing now - it never did.
+
+Predictions for the next range-test run (needs a fresh power cycle):
+- automatic / full: black **16** (17 if the source's black is really 1, as
+  the old table's 11 suggests), white **235**, chroma 128; `/proc` says
+  `BT.709 full->limited`.
+- limited: black ~30, white ~218 - WRONG, and expected: the GPU sends limited
+  but declares nothing, so it is taken as full. Unfixable from the receiver;
+  a source that declares limited gets the limited table.
+- YCbCr sources (the DSLR): unchanged - black ~20, chroma noise as before.
+
+### M253 verified on hardware (same power cycle, now 8 spawns)
+
+Range test after the fix: automatic and full -> black **Y 17**, white **235**,
+Cb = Cr = 128, `/proc` reporting `BT.709 full->limited`; limited -> 30 / 218,
+as predicted for a source that sends limited range without declaring it. 17
+rather than 16 is the source: its black is 1, not 0 (1 x 3518/4096 + 16 =
+16.86), which also explains the old table's 11 (1 x 0.9963 + 10.02). With the
+limited readings (old 25.96 -> 26, new 29.74 -> 30) the CSC output rounds to
+nearest, it does not truncate. Rhythm counter again even: card events
+`0/0/902/0/0/0`, frames taken `0/0/899/0/0/0`.
+
+Still to check on a fresh power cycle: a YCbCr source (the DSLR) is unchanged.
+
+## M254 (hardware, 2026-10-19): YCbCr sources untouched by M253 - DSLR stays on CSC bypass
+
+Kernel 7.2.11-1 (upgraded 2026-10-18), module rebuilt for it by
+`mz0380-live.sh load` (loaded srcversion = built `mz0380.ko`). DSLR on HDMI
+output, receiver kept from the previous load (no reset, no hotplug).
+
+The `csc` report now also prints the link and packet state its reading rests
+on (B1 0x01 bit2 = HDMI mode, B2 0x0b/0x0c/0x0e packet status, per M78), so a
+stale 0x48 from a DVI source can be told apart from a real one.
+
+Result, two reads:
+
+- `echo csc > /proc/mz0380-hdmi` (idle, 14:21:38): `0x48=00 0x4a=00 | link B1
+  01=8c (HDMI) | packets B2 0b=7e 0c=00 0e=b0`. Source is in HDMI mode, so the
+  0x00 is not a DVI leftover; it is the known bad idle read of 0x48 (it read
+  0x00 for an RGB-labelled source before, line ~7337). Note 0x0e returned
+  `b0`, the value 0x48 should hold - worth checking whether the idle path is
+  reading a shifted register before trusting any idle 0x48 again.
+- Stream start (OBS, H.264, 14:21:58, spawn 1 of this load): cached
+  `0x48=b0 0x4a=00` -> `source YUV422, RGB range default, CSC 0x92=00
+  (bypass)`. 3016 H.264 frames delivered, 0 dropped.
+
+So the decision M253 changed takes the bypass branch for the camera: YCbCr
+sources are unaffected. Not re-measured: camera black level in a raw capture
+(earlier ~20); the bypass branch's code is unchanged since before M253.

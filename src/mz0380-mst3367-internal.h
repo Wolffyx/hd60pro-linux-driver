@@ -9,7 +9,11 @@
 
 #include "mz0380.h"
 #include "mz0380-reg.h"
-#include "mz0380-edid.h"
+
+/* BANK0 0xb0: YUV422, 8-bit, embedded sync - what the VIC wants (M100). */
+#define MST3367_B0_OUTPUT	0x21
+/* BANK0 0x92: hdcapm's CSC control byte, the RGB -> YCbCr matrix (M130). */
+#define MST3367_CSC_CTL_HDCAPM	0x40
 
 #define MST3367_TRY(_op) do { \
 		ret = (_op); \
@@ -18,7 +22,7 @@
 	} while (0)
 
 struct mst3367_measured {
-	u16 htotal, vtotal, hactive;
+	u16 htotal, vtotal;
 	u16 hperiod, vperiod;
 	u16 hperiod_raw, vperiod_raw;
 	u16 lines;
@@ -37,7 +41,6 @@ int mst_rd(struct mz0380_dev *dev, u8 reg, u8 *val);
 int mst_bank(struct mz0380_dev *dev, u8 bank);
 int mst_set(struct mz0380_dev *dev, u8 reg, u8 mask);
 int mst_clr(struct mz0380_dev *dev, u8 reg, u8 mask);
-int mz0380_gpio_get(struct mz0380_dev *dev, unsigned int pin, u32 *out);
 
 int mst3367_measure(struct mz0380_dev *dev, struct mst3367_measured *out);
 bool mst3367_measurements_agree(const struct mst3367_measured *a,

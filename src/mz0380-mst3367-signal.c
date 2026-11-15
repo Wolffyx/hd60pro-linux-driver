@@ -205,6 +205,14 @@ mst3367_commit_digital_output(struct mz0380_dev *dev,
 	int ret;
 
 	lockdep_assert_held(&mst3367_lock);
+	/*
+	 * M247: re-committing an unchanged mode freezes and retimes a receiver
+	 * that may be feeding a running encoder - at every reattachment and
+	 * every idle query. Only a new mode, or a fresh acquisition, needs it.
+	 */
+	if (!initial_acquisition && dev->mst_committed_valid &&
+	    v4l2_match_dv_timings(&dev->mst_committed, timings, 0, false))
+		return 0;
 	if (initial_acquisition) {
 		ret = mst_bank(dev, MST3367_BANK2);
 		if (ret)
@@ -225,111 +233,27 @@ mst3367_commit_digital_output(struct mz0380_dev *dev,
 		return ret;
 
 	/*
-	 * M94: the Windows output-stage block, recovered from
-	 * e60MZ0380.X64.SYS 0x14024fc08..0x14024fd0e. The I2C write helper takes
-	 * the register in [rsp+0x20] and the value in [rsp+0x28] with r8b = 0x9c
-	 * and edx = 0 (bank 0), which makes the whole sequence readable:
-	 *
-	 *   0xb0  = 0x14          (plain write - dil, loaded at 0x14024fc08)
-	 *   0xae |= 0x04          (read-modify-write via the read helper)
-	 *   0xad  = 0 or 1        (seta on a context flag at rbx+0x8540)
-	 *   0xb1  = 0xc0
-	 *   0xb2  = 0             (bpl)
-	 *   0xb3  = 0             (0xff only on the board whose id bytes are
-	 *                          0x5f/0x05 - explicitly not this one)
-	 *   0xb4  = 0x55, then &= 0xfc   -> 0x54
-	 *
-	 * Our long-standing commit writes 0xb2, brackets 0xab bit7 and
-	 * read-modify-writes 0xb0 - and never touches 0xad, 0xae or 0xb4 at all.
-	 * 0xb1/0xb2/0xb3 read back matching Windows already; 0xb0 does not
-	 * (0x21 vs 0x14), and three registers are simply unset.
-	 *
-	 * M80 swept vic_b0 0x21 against 0x14 and found 0x14 WORSE - but that was
-	 * 0xb0 alone, with 0xae/0xad/0xb4 still at power-on. This is the first
-	 * time the block has been written as a block. Off by default; the
-	 * receiver output stage is the one place a "VIC sees nothing on BT1120"
-	 * verdict can originate that the host can still reach.
+	 * M100: BANK0 0xb0 decoded from hdcapm's own commented-out
+	 * alternatives: bit0 = embedded (1) vs external (0) sync, bit2 = 10-bit
+	 * vs 8-bit. 0x21 - YUV422, 8-bit, EMBEDDED sync - is the only value
+	 * that gets the SoC's VIC to initialise; it wants CCIR timing codes
+	 * in-stream. (M80/M94 measured Windows' 0x14 block as worse.)
 	 */
-	if (mz0380_mst_win_output) {
-		ret = mst_set(dev, 0xab, 0x80);	/* freeze while retiming */
-		if (!ret)
-			ret = mst_wr(dev, 0xb0, mz0380_vic_b0 & 0xff);
-		if (!ret)
-			ret = mst_set(dev, 0xae, 0x04);
-		if (!ret)
-			ret = mst_wr(dev, 0xad, mz0380_mst_ad & 0xff);
-		if (!ret)
-			ret = mst_wr(dev, 0xb1, mz0380_mst_b1 & 0xff);
-		if (!ret)
-			ret = mst_wr(dev, 0xb2, mz0380_mst_b2 & 0xff);
-		if (!ret)
-			ret = mst_wr(dev, 0xb3, 0x00);
-		if (!ret)
-			ret = mst_wr(dev, 0xb4, 0x55);
-		if (!ret)
-			ret = mst_clr(dev, 0xb4, 0x03);
-		clear_ret = mst_clr(dev, 0xab, 0x80);
-		pr_info("%s: MST3367 output stage: Windows block applied (b0=%02x ae|=04 ad=%02x b1=%02x b2=%02x b3=00 b4=54) ret=%d\n",
-			dev->name, mz0380_vic_b0 & 0xff,
-			mz0380_mst_ad & 0xff, mz0380_mst_b1 & 0xff,
-			mz0380_mst_b2 & 0xff, ret);
-		return ret ? ret : clear_ret;
-	}
-
-	/*
-	 * M100: BANK0 0xb0 is fully decoded now, from hdcapm's own commented-out
-	 * alternatives (mst3367-drv.c, end of the init function) - the same
-	 * receiver, values straight off a vendor trace:
-	 *
-	 *   0x25  RX_OUTPUT_YUV422 / 10.BITS / (EMBEDDED sync, by the bit rule)
-	 *   0x24  RX_OUTPUT_YUV422 / 10.BITS / EXTERNAL SYNC
-	 *   0x21  RX_OUTPUT_YUV422 / 08.BITS / EMBEDDED SYNC   <- ours
-	 *   0x20  RX_OUTPUT_YUV422 / 08.BITS / EXTERNAL SYNC
-	 *
-	 * so: bit0 = embedded (1) vs external (0) sync, bit2 = 10-bit (1) vs
-	 * 8-bit (0). This RETIRES the "bit0 is unidentified" comment that stood
-	 * for months, and corrects M96, which inferred bit0 was a bus-width /
-	 * clock-rate select from the receiver's period counters halving.
-	 *
-	 * It also explains every result we have. Both values that write nothing
-	 * at all (Windows' 0x14 and hdcapm's 0x20) have bit0 = 0, i.e. EXTERNAL
-	 * sync; the only value that gets the VIC to initialise (0x21) is the
-	 * EMBEDDED-sync one. The SoC's VIC wants CCIR timing codes in-stream,
-	 * which is also the half of "(CCIR or width chck fail)" we can now see
-	 * we are on the right side of.
-	 *
-	 * Untried and the obvious next step: 0x25, which is 0x21 plus bit2 -
-	 * one bit off the only value known to reach VIC init, and BT.1120 is
-	 * natively a 20-bit interface (10-bit Y + 10-bit C). Feeding a 10-bit
-	 * VIC an 8-bit stream is precisely a width/structure mismatch.
-	 */
-	ret = mst_wr(dev, 0xb2, special_720p30 ? 0x03 : (mz0380_mst_b2 & 0xff));
+	ret = mst_wr(dev, 0xb2, special_720p30 ? 0x03 : 0x00);
 	if (ret)
 		return ret;
-	ret = mst_set(dev, 0xab, 0x80);
+	ret = mst_set(dev, 0xab, 0x80);		/* freeze while retiming */
 	if (ret)
 		return ret;
 	ret = mst_rd(dev, 0xb0, &b0);
-	if (!ret) {
-		u8 b0val = (b0 & 0xc2) |
-			   (special_720p30 ? 0x20 : (mz0380_vic_b0 & 0x3d));
-
-		/*
-		 * M126: gchd's order - configuration first with the embedded-sync
-		 * bit low, then assert it as the last write, outside the freeze.
-		 */
-		ret = mst_wr(dev, 0xb0,
-			     mz0380_mst_b0_late ? (u8)(b0val & ~0x01) : b0val);
-		clear_ret = mst_clr(dev, 0xab, 0x80);
-		if (mz0380_mst_b0_late && !ret && !clear_ret) {
-			ret = mst_wr(dev, 0xb0, b0val);
-			pr_info("%s: MST3367 0xb0 committed in two steps: %02x (frozen) then %02x (after unfreeze) ret=%d\n",
-				dev->name, (u8)(b0val & ~0x01), b0val, ret);
-		}
-	} else {
-		clear_ret = mst_clr(dev, 0xab, 0x80);
+	if (!ret)
+		ret = mst_wr(dev, 0xb0, (b0 & 0xc2) |
+			     (special_720p30 ? 0x20 : (MST3367_B0_OUTPUT & 0x3d)));
+	clear_ret = mst_clr(dev, 0xab, 0x80);
+	if (!ret && !clear_ret) {
+		dev->mst_committed = *timings;
+		dev->mst_committed_valid = true;
 	}
-
 	return ret ? ret : clear_ret;
 }
 
@@ -426,12 +350,9 @@ static int mst3367_measure_once(struct mz0380_dev *dev,
 	}
 
 	/*
-	 * M64: prove the snapshot before spending anything else. hactive used
-	 * to be fetched here, costing a BANK2 switch, two reads and a switch
-	 * back - four mailbox round-trips, ~25ms of a ~300ms burst - ahead of
-	 * the checks that decide whether the sample is usable at all. Nothing
-	 * in mst3367_match_mode() reads hactive, so it is now collected after
-	 * the verdict, best-effort.
+	 * M64: prove the snapshot before spending anything else. (hactive is
+	 * not read at all since M247: nothing matches on it, and it cost a
+	 * bank switch and three more round-trips per sample for a log line.)
 	 */
 	MST3367_TRY(mst_rd(dev, MST3367_B0_VTOTAL_HI, &vtotal_hi_after));
 	MST3367_TRY(mst_rd(dev, MST3367_B0_VTOTAL_LO, &vtotal_lo_after));
@@ -507,25 +428,12 @@ static int mst3367_measure_once(struct mz0380_dev *dev,
 	 */
 	if (!mst3367_status_locked(detect_after)) {
 		out->lock_ended_during_pass = true;
-		pr_info("%s: MST3367 source stopped during the trailing reads (R55 %02x -> %02x) but the sample is self-consistent - keeping it\n",
-			dev->name, detect, detect_after);
+		dev_dbg(&dev->pci->dev,
+			"MST3367 source stopped during the trailing reads (R55 %02x -> %02x) but the sample is self-consistent - keeping it\n",
+			detect, detect_after);
 	} else {
 		out->detect = detect_after;
 	}
-
-	/*
-	 * Diagnostic only, and deliberately last: a failure here does not
-	 * invalidate a sample that has already proved itself, and by now the
-	 * source may legitimately have stopped.
-	 */
-	if (!mst_bank(dev, MST3367_BANK2) &&
-	    !mst_rd(dev, MST3367_B2_HACTIVE_HI, &hi) &&
-	    !mst_rd(dev, MST3367_B2_HACTIVE_LO, &lo)) {
-		out->hactive = (((u16)hi << 8) | lo) & 0x1fff;
-		if (out->hactive & 1)
-			out->hactive++;
-	}
-	mst_bank(dev, MST3367_BANK0);
 
 	return 0;
 }
@@ -535,67 +443,22 @@ bool mst3367_measurements_agree(const struct mst3367_measured *a,
 {
 	return abs((int)a->htotal - (int)b->htotal) <= 2 &&
 	       abs((int)a->vtotal - (int)b->vtotal) <= 2 &&
-	       abs((int)a->hactive - (int)b->hactive) <= 2 &&
 	       abs((int)a->hperiod - (int)b->hperiod) <= 2 &&
 	       abs((int)a->vperiod - (int)b->vperiod) <= 2 &&
 	       a->interlaced == b->interlaced;
 }
 
+/*
+ * M62: one pass. measure_once already proves its snapshot did not move and
+ * that the fields are mutually consistent; a second confirming pass needs
+ * ~170 ms of unbroken lock, which a bursty source does not hold. On failure
+ * the rejected sample is handed back too - its numbers are the only evidence
+ * of WHY a lock that really happened produced no timing.
+ */
 int mst3367_measure(struct mz0380_dev *dev, struct mst3367_measured *out)
 {
-	struct mst3367_measured first, second;
-	int ret;
-
 	lockdep_assert_held(&mst3367_lock);
-	ret = mst3367_measure_once(dev, &first);
-	if (ret) {
-		/*
-		 * M62: hand the rejected sample back too. Its numbers plus
-		 * ->reject are the only evidence of WHY a lock that really
-		 * happened produced no timing, and without them a failed run
-		 * says nothing more than "-EAGAIN".
-		 */
-		*out = first;
-		return ret;
-	}
-
-	/*
-	 * M62: the confirming pass is opt-in. See signal_confirm in core.c -
-	 * two agreeing passes need ~170ms of unbroken lock, which the only
-	 * source we have does not hold. measure_once already proves its own
-	 * snapshot did not move (detect + vtotal_lo re-read) and that the
-	 * fields are mutually consistent.
-	 */
-	if (!mz0380_signal_confirm) {
-		*out = first;
-		return 0;
-	}
-
-	usleep_range(10000, 12000);
-	ret = mst3367_measure_once(dev, &second);
-	if (ret) {
-		*out = second;
-		return ret;
-	}
-	if (!mst3367_measurements_agree(&first, &second)) {
-		second.reject = "the two confirming passes disagreed";
-		*out = second;
-		return -EAGAIN;
-	}
-
-	*out = second;
-	return 0;
-}
-
-static bool mst3367_force_is_safe_1080p60(const struct mst3367_measured *m)
-{
-	return !m->interlaced &&
-	       m->hactive >= 1918 && m->hactive <= 1924 &&
-	       m->vtotal >= 1120 && m->vtotal <= 1130 &&
-	       m->hperiod >= 665 && m->hperiod <= 685 &&
-	       m->vperiod >= 595 && m->vperiod <= 605 &&
-	       ((m->htotal >= 2190 && m->htotal <= 2210) ||
-		(m->htotal >= 3290 && m->htotal <= 3310));
+	return mst3367_measure_once(dev, out);
 }
 
 /*
@@ -655,34 +518,57 @@ int mz0380_mst3367_read_lock(struct mz0380_dev *dev, bool *locked,
 	return ret;
 }
 
+/* Log a recognised mode once, not on every measurement of it. */
+static void mst3367_log_mode(struct mz0380_dev *dev,
+			     const struct v4l2_dv_timings *t,
+			     const struct mst3367_measured *m, bool scaled)
+{
+	if (dev->mst_logged.bt.width &&
+	    v4l2_match_dv_timings(&dev->mst_logged, t, 0, false))
+		return;
+	dev->mst_logged = *t;
+	dev_info(&dev->pci->dev,
+		 "HDMI signal: %ux%u%c@%u\n", t->bt.width, t->bt.height,
+		 t->bt.interlaced ? 'i' : 'p', mz0380_source_fps(t));
+	dev_dbg(&dev->pci->dev,
+		"MST3367 htot=%u%s vtot=%u hper=%u vper=%u R55=0x%02x%s\n",
+		m->htotal, scaled ? " [host units]" : "", m->vtotal,
+		m->hperiod, m->vperiod, m->detect,
+		m->interlace_from_geometry ? "" : " [interlace from R5F bit]");
+}
+
+/* A stable mode the card cannot capture: say so once per geometry. */
+static void mst3367_log_unsupported(struct mz0380_dev *dev,
+				    const struct mst3367_measured *m)
+{
+	if (dev->mst_unsupported_htotal == m->htotal &&
+	    dev->mst_unsupported_vtotal == m->vtotal)
+		return;
+	dev->mst_unsupported_htotal = m->htotal;
+	dev->mst_unsupported_vtotal = m->vtotal;
+	dev_warn(&dev->pci->dev,
+		 "HDMI source mode is not supported (htot=%u vtot=%u hper=%u vper=%u lines=%u %s, R55=0x%02x); set the source to 1080p/1080i/720p/480p - and please report it\n",
+		 m->htotal, m->vtotal, m->hperiod, m->vperiod, m->lines,
+		 m->interlaced ? "interlaced" : "progressive", m->detect);
+}
+
 /*
  * Read the MST3367 mode-detect block and fill *out. Returns 0 with a valid
- * timing when a signal is locked, -ENOLCK when no coherent signal, -ERANGE
- * for a coherent unsupported mode, or an I/O errno. Runs bring-up on first use.
+ * timing, -ENOLCK when no lock was seen, -EAGAIN when lock was seen but no
+ * coherent sample came of it, -ERANGE for a coherent unsupported mode, or an
+ * I/O errno. Runs bring-up on first use.
  */
 int mz0380_mst3367_read_signal(struct mz0380_dev *dev,
 			       struct v4l2_dv_timings *out)
 {
-	static const struct v4l2_dv_timings forced_p60 =
-		V4L2_DV_BT_CEA_1920X1080P60;
 	const struct v4l2_dv_timings *match = NULL;
 	struct mst3367_measured m = { 0 };
-	/*
-	 * M63: m now also receives REJECTED samples (that is how the failure
-	 * path reports real numbers), so the last coherent-but-unsupported one
-	 * has to be kept separately or a later rejection overwrites it and the
-	 * -ERANGE report describes the wrong sample.
-	 */
+	/* m also receives REJECTED samples, so keep the unsupported one apart */
 	struct mst3367_measured unsupported = { 0 };
-	bool scaled = false;
+	unsigned int unsupported_agree = 0;
 	bool acquisition_enabled = false;
-	bool forced = false;
-	bool have_sample = false;
 	bool saw_full_lock = false;
-	/* M62: m holds the last REJECTED sample too, so the failure path can
-	 * report the numbers that were actually read. */
-	unsigned int lock_samples = 0, sample_attempts = 0;
-	int last_sample_ret = 0;
+	bool scaled = false;
 	unsigned long deadline;
 	u8 detect = 0;
 	int ret;
@@ -696,104 +582,76 @@ int mz0380_mst3367_read_signal(struct mz0380_dev *dev,
 	}
 
 	/*
-	 * The Windows driver gates timing reads on the complete R55 lock mask.
-	 * Partial masks are acquisition states, not lower-quality locks.  Keep
-	 * auto-position enabled while acquiring or after any unstable snapshot;
-	 * disable it only once two coherent samples identify a supported mode.
+	 * The Windows driver gates timing reads on the complete R55 lock mask;
+	 * partial masks are acquisition states, not lower-quality locks. Keep
+	 * auto-position enabled while acquiring or after any unstable sample,
+	 * and disable it once a supported mode is identified.
 	 */
 	mutex_lock(&mst3367_lock);
-	deadline = jiffies + msecs_to_jiffies(mz0380_signal_poll_ms);
+	deadline = jiffies + msecs_to_jiffies(MZ0380_SIGNAL_POLL_MS);
 	for (;;) {
 		ret = mst_bank(dev, MST3367_BANK0);
-		if (ret)
-			goto out_unlock;
-		ret = mst_rd(dev, MST3367_B0_DETECT, &detect);
+		if (!ret)
+			ret = mst_rd(dev, MST3367_B0_DETECT, &detect);
 		if (ret)
 			goto out_unlock;
 
-		if (!mst3367_status_locked(detect)) {
-			if (!acquisition_enabled) {
-				ret = mst3367_set_auto_position(dev, true);
-				if (ret)
-					goto out_unlock;
-				acquisition_enabled = true;
-			}
-		} else {
+		if (mst3367_status_locked(detect)) {
 			saw_full_lock = true;
-			lock_samples++;
-			sample_attempts++;
 			ret = mst3367_measure(dev, &m);
-			last_sample_ret = ret;
 			if (!ret) {
-				have_sample = true;
-				unsupported = m;
 				match = mst3367_match_mode(&m, &scaled);
-				if (!match && mz0380_force_timings &&
-				    mst3367_force_is_safe_1080p60(&m)) {
-					match = &forced_p60;
-					forced = true;
-					scaled = false;
-				}
 				if (match)
-					goto matched;
+					break;
+				/*
+				 * M247: two agreeing samples of an unsupported
+				 * mode settle it; polling out the full window
+				 * only kept the mailbox busy.
+				 */
+				if (unsupported_agree &&
+				    mst3367_measurements_agree(&unsupported, &m))
+					unsupported_agree++;
+				else
+					unsupported_agree = 1;
+				unsupported = m;
+				if (unsupported_agree >= 2)
+					break;
 			} else if (ret != -ENOLCK && ret != -EAGAIN) {
 				goto out_unlock;
 			}
-
-			/* Lost lock, incoherent, or coherent but unsupported. */
-			if (!acquisition_enabled) {
-				ret = mst3367_set_auto_position(dev, true);
-				if (ret)
-					goto out_unlock;
-				acquisition_enabled = true;
-			}
 		}
 
+		/* Lost lock, incoherent, or unsupported: keep acquiring. */
+		if (!acquisition_enabled) {
+			ret = mst3367_set_auto_position(dev, true);
+			if (ret)
+				goto out_unlock;
+			acquisition_enabled = true;
+		}
 		if (time_after_eq(jiffies, deadline))
 			break;
 		msleep(20);
 	}
 
-	if (have_sample) {
-		pr_info("%s: MST3367 coherent but unsupported: htot=%u vtot=%u hact=%u hper=%u(raw %u) vper=%u(raw %u) lines=%u 5f=%02x %s [R55=0x%02x] - please report\n",
-			dev->name, unsupported.htotal, unsupported.vtotal,
-			unsupported.hactive, unsupported.hperiod,
-			unsupported.hperiod_raw, unsupported.vperiod,
-			unsupported.vperiod_raw, unsupported.lines,
-			unsupported.r5f,
-			unsupported.interlaced ? "i" : "p", unsupported.detect);
+	if (match) {
+		ret = mst3367_set_auto_position(dev, false);
+		if (!ret)
+			ret = mst3367_commit_digital_output(dev, match);
+		if (!ret) {
+			*out = *match;
+			mst3367_log_mode(dev, match, &m, scaled);
+		}
+	} else if (unsupported_agree) {
+		mst3367_log_unsupported(dev, &unsupported);
 		ret = -ERANGE;
 	} else {
 		if (saw_full_lock)
-			pr_info("%s: MST3367 full lock appeared %u time(s), %u measurement attempt(s), none coherent (last %d: %s) - rejected sample was htot=%u vtot=%u hact=%u hper=%u(raw %u) vper=%u(raw %u) lines=%u 5f=%02x %s R55=%02x\n",
-				dev->name, lock_samples, sample_attempts,
-				last_sample_ret,
-				m.reject ? m.reject : "no reason recorded",
-				m.htotal, m.vtotal, m.hactive, m.hperiod,
-				m.hperiod_raw, m.vperiod, m.vperiod_raw,
-				m.lines, m.r5f, m.interlaced ? "i" : "p",
-				m.detect);
-		ret = -ENOLCK;
+			dev_dbg(&dev->pci->dev,
+				"MST3367 lock seen but no coherent sample (last: %s; htot=%u vtot=%u hper=%u vper=%u R55=0x%02x)\n",
+				m.reject ?: "no reason recorded", m.htotal,
+				m.vtotal, m.hperiod, m.vperiod, m.detect);
+		ret = saw_full_lock ? -EAGAIN : -ENOLCK;
 	}
-	goto out_unlock;
-
-matched:
-	ret = mst3367_set_auto_position(dev, false);
-	if (ret)
-		goto out_unlock;
-	ret = mst3367_commit_digital_output(dev, match);
-	if (ret)
-		goto out_unlock;
-	*out = *match;
-	pr_info("%s: MST3367 signal: %ux%u%s%s%s (htot=%u vtot=%u hper=%u vper=%u hact=%u R55=0x%02x)%s%s\n",
-		dev->name, out->bt.width, out->bt.height,
-		out->bt.interlaced ? "i" : "p",
-		scaled ? " [host units]" : "",
-		forced ? " [strict forced fallback]" : "", m.htotal, m.vtotal,
-		m.hperiod, m.vperiod, m.hactive, m.detect,
-		m.interlace_from_geometry ? "" : " [interlace from R5F bit]",
-		m.lock_ended_during_pass ? " [source stopped mid-pass]" : "");
-	ret = 0;
 
 out_unlock:
 	mutex_unlock(&mst3367_lock);

@@ -5,14 +5,14 @@
 
 #include "mz0380.h"
 
-bool allow_bus_master;
-module_param(allow_bus_master, bool, 0444);
-MODULE_PARM_DESC(allow_bus_master,
-		 "allow PCI bus mastering during probe; unsafe until DMA is understood");
+MODULE_DESCRIPTION("Elgato Game Capture HD60 Pro (YUAN MZ0380) capture driver");
+MODULE_AUTHOR("wolffyx");
+MODULE_LICENSE("GPL");	/* GPL-2.0-or-later; see COPYING */
+MODULE_VERSION(MZ0380_VERSION);
 
 static unsigned int card[] = { [0 ... (MZ0380_MAXBOARDS - 1)] = UNSET };
 module_param_array(card, uint, NULL, 0444);
-MODULE_PARM_DESC(card, "card type");
+MODULE_PARM_DESC(card, "board type override per card: 1 = HD60 Pro, 2 = HD60 Pro Rev.3");
 
 /*
  * M245: card numbers are allocated, not counted. A plain counter was never
@@ -20,37 +20,32 @@ MODULE_PARM_DESC(card, "card type");
  * probe read card[] past its end.
  */
 static DEFINE_IDA(mz0380_ida);
-DEFINE_MUTEX(devlist);
+DEFINE_MUTEX(mz0380_devlist_lock);
+LIST_HEAD(mz0380_devlist);
 
 static void mz0380_resume_work_fn(struct work_struct *work);
-LIST_HEAD(mz0380_devlist);
 
 static int mz0380_request_bar(struct mz0380_dev *dev, int map, int bar)
 {
 	resource_size_t start = pci_resource_start(dev->pci, bar);
 	resource_size_t len = pci_resource_len(dev->pci, bar);
 
-	if (request_mem_region(start, len, dev->name) == 0) {
-		pr_err("%s: can't get bar[%d] memory @ 0x%llx\n",
-		       dev->name, bar, (unsigned long long)start);
+	if (!request_mem_region(start, len, dev->name)) {
+		dev_err(&dev->pci->dev, "can't get bar[%d] memory @ 0x%llx\n",
+			bar, (unsigned long long)start);
 		return -EBUSY;
+	}
+
+	dev->lmmio[map] = ioremap(start, len);
+	if (!dev->lmmio[map]) {
+		release_mem_region(start, len);
+		dev_err(&dev->pci->dev, "failed to ioremap bar[%d]\n", bar);
+		return -ENOMEM;
 	}
 
 	dev->bar_nr[map] = bar;
 	dev->bar_start[map] = start;
 	dev->bar_len[map] = len;
-
-	dev->lmmio[map] = ioremap(start, len);
-	if (!dev->lmmio[map]) {
-		release_mem_region(start, len);
-		dev->bar_nr[map] = -1;
-		dev->bar_start[map] = 0;
-		dev->bar_len[map] = 0;
-		pr_err("%s: failed to ioremap bar[%d]\n",
-		       dev->name, bar);
-		return -ENOMEM;
-	}
-
 	dev->bmmio[map] = (u8 __iomem *)dev->lmmio[map];
 	return 0;
 }
@@ -71,39 +66,9 @@ static void mz0380_release_bar(struct mz0380_dev *dev, int map)
 	}
 }
 
-static int mz0380_dev_setup(struct mz0380_dev *dev)
+static void mz0380_identify_board(struct mz0380_dev *dev)
 {
-	int i;
-	int ret;
-
-	mutex_init(&dev->lock);
-	mutex_init(&dev->ctrl_lock);
-	mutex_init(&dev->fw_lock);
-	mutex_init(&dev->cmd_lock);
-	mutex_init(&dev->h264_delivery_lock);
-	init_waitqueue_head(&dev->fw_wait);
-	init_waitqueue_head(&dev->cmd_wait);
-	spin_lock_init(&dev->buf_lock);
-	spin_lock_init(&dev->event_lock);
-	spin_lock_init(&dev->frame_event_lock);
-	INIT_LIST_HEAD(&dev->buf_list);
-	mz0380_signal_recovery_init(dev);
-	mz0380_no_signal_init(dev);
-	INIT_WORK(&dev->resume_work, mz0380_resume_work_fn);
-	dev->fw_state = MZ0380_FW_STATE_NONE;
-	atomic_set(&dev->irq_count, 0);
-	atomic_set(&dev->irq_video_count, 0);
-	atomic_set(&dev->irq_audio_count, 0);
-	atomic_set(&dev->irq_signal_count, 0);
-
-	ret = ida_alloc(&mz0380_ida, GFP_KERNEL);
-	if (ret < 0)
-		return ret;
-	dev->nr = ret;
-	snprintf(dev->name, sizeof(dev->name), "mz0380[%u]", dev->nr);
-
-	for (i = 0; i < MZ0380_MAX_MAPS; i++)
-		dev->bar_nr[i] = -1;
+	unsigned int i;
 
 	dev->board = UNSET;
 	if (dev->nr < MZ0380_MAXBOARDS && card[dev->nr] < mz0380_bcount)
@@ -117,6 +82,47 @@ static int mz0380_dev_setup(struct mz0380_dev *dev)
 		dev->board = MZ0380_BOARD_UNKNOWN;
 		mz0380_card_list(dev);
 	}
+}
+
+static int mz0380_dev_setup(struct mz0380_dev *dev)
+{
+	int i;
+	int ret;
+
+	mutex_init(&dev->lock);
+	mutex_init(&dev->ctrl_lock);
+	mutex_init(&dev->fw_lock);
+	mutex_init(&dev->cmd_lock);
+	mutex_init(&dev->delivery_lock);
+	init_waitqueue_head(&dev->cmd_wait);
+	spin_lock_init(&dev->buf_lock);
+	spin_lock_init(&dev->event_lock);
+	spin_lock_init(&dev->frame_event_lock);
+	INIT_LIST_HEAD(&dev->buf_list);
+	mz0380_signal_recovery_init(dev);
+	mz0380_no_signal_init(dev);
+	INIT_WORK(&dev->resume_work, mz0380_resume_work_fn);
+	dev->fw_state = MZ0380_FW_STATE_NONE;
+	/*
+	 * M247: every archived load logged "MST3367 silent after reset
+	 * (dir_invert=0)" and then answered with 1, costing a whole reset pass.
+	 * Start with the sense that works; bring-up still falls back to the
+	 * other one if the receiver stays silent.
+	 */
+	dev->mst_gpio_dir_invert = true;
+	atomic_set(&dev->irq_count, 0);
+	atomic_set(&dev->irq_video_count, 0);
+
+	ret = ida_alloc(&mz0380_ida, GFP_KERNEL);
+	if (ret < 0)
+		return ret;
+	dev->nr = ret;
+	snprintf(dev->name, sizeof(dev->name), "mz0380[%u]", dev->nr);
+
+	for (i = 0; i < MZ0380_MAX_MAPS; i++)
+		dev->bar_nr[i] = -1;
+
+	mz0380_identify_board(dev);
 
 	ret = mz0380_request_bar(dev, MZ0380_MAP_BAR_MMIO, MZ0380_BAR_MMIO);
 	if (ret < 0)
@@ -128,30 +134,12 @@ static int mz0380_dev_setup(struct mz0380_dev *dev)
 
 	if (dev->bar_len[MZ0380_MAP_BAR_MMIO] < MZ0380_BAR_MMIO_SIZE ||
 	    dev->bar_len[MZ0380_MAP_BAR_CFG] < MZ0380_BAR_CFG_SIZE) {
-		pr_err("%s: unexpected BAR sizes mmio=0x%llx cfg=0x%llx\n",
-		       dev->name,
-		       (unsigned long long)dev->bar_len[MZ0380_MAP_BAR_MMIO],
-		       (unsigned long long)dev->bar_len[MZ0380_MAP_BAR_CFG]);
+		dev_err(&dev->pci->dev, "unexpected BAR sizes mmio=0x%llx cfg=0x%llx\n",
+			(unsigned long long)dev->bar_len[MZ0380_MAP_BAR_MMIO],
+			(unsigned long long)dev->bar_len[MZ0380_MAP_BAR_CFG]);
 		ret = -ENODEV;
 		goto fail;
 	}
-
-	pr_info("%s: subsystem: %04x:%04x, board: %s [card=%d,%s]\n",
-		dev->name,
-		dev->pci->subsystem_vendor,
-		dev->pci->subsystem_device,
-		mz0380_boards[dev->board].name,
-		dev->board,
-		dev->nr < MZ0380_MAXBOARDS && card[dev->nr] == dev->board ?
-			"insmod option" : "autodetected");
-	pr_info("%s: bar%d @ 0x%llx [0x%llx bytes], bar%d @ 0x%llx [0x%llx bytes]\n",
-		dev->name,
-		dev->bar_nr[MZ0380_MAP_BAR_MMIO],
-		(unsigned long long)dev->bar_start[MZ0380_MAP_BAR_MMIO],
-		(unsigned long long)dev->bar_len[MZ0380_MAP_BAR_MMIO],
-		dev->bar_nr[MZ0380_MAP_BAR_CFG],
-		(unsigned long long)dev->bar_start[MZ0380_MAP_BAR_CFG],
-		(unsigned long long)dev->bar_len[MZ0380_MAP_BAR_CFG]);
 
 	return 0;
 
@@ -160,13 +148,6 @@ fail:
 	mz0380_release_bar(dev, MZ0380_MAP_BAR_MMIO);
 	ida_free(&mz0380_ida, dev->nr);
 	return ret;
-}
-
-static void mz0380_dev_unregister(struct mz0380_dev *dev)
-{
-	mz0380_card_cleanup(dev);
-	mz0380_release_bar(dev, MZ0380_MAP_BAR_CFG);
-	mz0380_release_bar(dev, MZ0380_MAP_BAR_MMIO);
 }
 
 /*
@@ -193,6 +174,27 @@ static void mz0380_resume_work_fn(struct work_struct *work)
 		dev_info(&dev->pci->dev, "resume: card handshake complete\n");
 }
 
+/* IRQ and DMA windows. A failure costs streaming, never the node. */
+static void mz0380_streaming_setup(struct mz0380_dev *dev)
+{
+	int err;
+
+	err = mz0380_irq_request(dev);
+	if (err) {
+		dev_warn(&dev->pci->dev,
+			 "IRQ request failed (%d) - continuing without streaming\n",
+			 err);
+		return;
+	}
+	err = mz0380_dma_setup(dev);
+	if (err) {
+		dev_warn(&dev->pci->dev,
+			 "DMA setup failed (%d) - continuing without streaming\n",
+			 err);
+		mz0380_irq_release(dev);
+	}
+}
+
 static int mz0380_initdev(struct pci_dev *pci_dev,
 			  const struct pci_device_id *pci_id)
 {
@@ -211,73 +213,34 @@ static int mz0380_initdev(struct pci_dev *pci_dev,
 		return err;
 	}
 
-	pci_clear_master(pci_dev);
 	/*
 	 * Mask INTx for the duration of probe: nothing is registered to service
 	 * the line yet, and a pending assert on a shared line would spin the
 	 * kernel in unclaimed-interrupt handling between event and ack.
-	 * mz0380_irq_request() unmasks it again once an ISR exists, which on
-	 * the default INTx path (M82) is required for any interrupt at all.
+	 * mz0380_irq_request() unmasks it again once an ISR exists.
 	 */
 	pci_intx(pci_dev, 0);
-	pci_read_config_byte(pci_dev, PCI_CLASS_REVISION, &dev->pci_rev);
-	pci_read_config_byte(pci_dev, PCI_LATENCY_TIMER, &dev->pci_lat);
-
 	/*
-	 * M4 diagnostic: bus mastering must be live BEFORE the firmware
-	 * handshake (which happens inside mz0380_firmware_load below), not
-	 * after. Enable it here so the CMD_INIT doorbell is issued with bus
-	 * mastering on. No ring addresses are programmed (still unverified),
-	 * so the card has no host DMA target - safe.
+	 * M4: bus mastering must be live BEFORE the card handshake. No DMA
+	 * target is handed to the card until a stream starts.
 	 */
-	if (mz0380_dma_handshake) {
-		pci_set_master(pci_dev);
-		pr_info("%s: dma_handshake: bus mastering enabled pre-firmware\n",
-			pci_name(pci_dev));
-	}
-
-	pr_info("mz0380 device found at %s, rev: %u, irq: %u, latency: %u\n",
-		pci_name(pci_dev), dev->pci_rev, pci_dev->irq, dev->pci_lat);
-	pr_info("%s: probe mode: bus master initially disabled\n",
-		pci_name(pci_dev));
+	pci_set_master(pci_dev);
 
 	err = mz0380_dev_setup(dev);
 	if (err < 0)
 		goto fail_disable;
 
 	/*
-	 * Phase 1: card handshake. Nothing is uploaded - the card boots
-	 * its own flash image; we only shake hands and read its version.
+	 * The card boots its own flash image; this only shakes hands with it.
+	 * A deaf card keeps the node (so the failure is visible), not capture.
 	 */
 	err = mz0380_firmware_load(dev);
-	if (err) {
-		pr_warn("%s: firmware load skipped/failed (%d) - continuing without it\n",
-			dev->name, err);
-		/* not fatal during bring-up */
-	}
+	if (err)
+		dev_warn(&dev->pci->dev,
+			 "card handshake failed (%d) - capture will not be available\n",
+			 err);
 
-	/*
-	 * Phase 2: request IRQ + alloc DMA rings, gated by enable_dma.
-	 * Bus mastering is enabled only inside mz0380_dma_setup, AFTER
-	 * the ring base addresses have been programmed.
-	 */
-	if (mz0380_enable_dma) {
-		err = mz0380_irq_request(dev);
-		if (err) {
-			pr_warn("%s: IRQ request failed (%d) - continuing without DMA\n",
-				dev->name, err);
-		} else {
-			err = mz0380_dma_setup(dev);
-			if (err) {
-				pr_warn("%s: DMA setup failed (%d) - continuing without streaming\n",
-					dev->name, err);
-				mz0380_irq_release(dev);
-			}
-		}
-	} else if (allow_bus_master) {
-		/* legacy escape hatch: bus-master without DMA setup */
-		pci_set_master(pci_dev);
-	}
+	mz0380_streaming_setup(dev);
 
 	err = mz0380_card_setup(dev);
 	if (err < 0)
@@ -285,20 +248,27 @@ static int mz0380_initdev(struct pci_dev *pci_dev,
 
 	pci_set_drvdata(pci_dev, dev);
 
-	mutex_lock(&devlist);
+	mutex_lock(&mz0380_devlist_lock);
 	list_add_tail(&dev->devlist, &mz0380_devlist);
-	mutex_unlock(&devlist);
+	mutex_unlock(&mz0380_devlist_lock);
 
-	dev_dbg(&pci_dev->dev, "probe complete\n");
+	dev_info(&pci_dev->dev, "%s (subsystem %04x:%04x), firmware %u.%u%s\n",
+		 mz0380_boards[dev->board].name,
+		 pci_dev->subsystem_vendor, pci_dev->subsystem_device,
+		 dev->fw_version_major, dev->fw_version_minor,
+		 dev->dma_armed ? "" : " - streaming unavailable");
 	return 0;
 
 fail_dma:
 	mz0380_irq_release(dev);
 	mz0380_dma_teardown(dev);
 	mz0380_firmware_release(dev);
-	mz0380_dev_unregister(dev);
+	mz0380_card_cleanup(dev);
+	mz0380_release_bar(dev, MZ0380_MAP_BAR_CFG);
+	mz0380_release_bar(dev, MZ0380_MAP_BAR_MMIO);
 	ida_free(&mz0380_ida, dev->nr);
 fail_disable:
+	pci_clear_master(pci_dev);
 	pci_disable_device(pci_dev);
 	kfree(dev);
 	return err;
@@ -311,9 +281,9 @@ static void mz0380_finidev(struct pci_dev *pci_dev)
 	if (!dev)
 		return;
 
-	mutex_lock(&devlist);
+	mutex_lock(&mz0380_devlist_lock);
 	list_del(&dev->devlist);
-	mutex_unlock(&devlist);
+	mutex_unlock(&mz0380_devlist_lock);
 
 	cancel_work_sync(&dev->resume_work);
 
@@ -324,11 +294,6 @@ static void mz0380_finidev(struct pci_dev *pci_dev)
 	 * kept open past this point has nothing left to stop when it closes.
 	 */
 	mz0380_card_cleanup(dev);
-
-	/* stop the event watcher before any MMIO mapping is torn down */
-	mz0380_event_watch_stop(dev);
-
-	mz0380_nosg_capture_stop(dev);	/* join before the bufs it polls die */
 	mz0380_dma_stop(dev);
 	/*
 	 * M84: free the IRQ BEFORE any MMIO mapping goes away. On the shared
@@ -337,7 +302,8 @@ static void mz0380_finidev(struct pci_dev *pci_dev)
 	 * oopsed inside rmmod.
 	 */
 	mz0380_irq_release(dev);
-	mz0380_dev_unregister(dev);
+	mz0380_release_bar(dev, MZ0380_MAP_BAR_CFG);
+	mz0380_release_bar(dev, MZ0380_MAP_BAR_MMIO);
 	mz0380_dma_teardown(dev);
 	mz0380_firmware_release(dev);
 	pci_clear_master(pci_dev);
@@ -359,8 +325,6 @@ static void mz0380_shutdown(struct pci_dev *pci_dev)
 		return;
 
 	cancel_work_sync(&dev->resume_work);
-	mz0380_event_watch_stop(dev);
-	mz0380_nosg_capture_stop(dev);
 	mz0380_dma_quiesce(dev);
 	pci_clear_master(pci_dev);
 }
@@ -385,8 +349,6 @@ static int mz0380_suspend(struct device *d)
 	cancel_work_sync(&dev->resume_work);
 	if (dev->video_registered && vb2_is_streaming(&dev->vb_queue))
 		vb2_queue_error(&dev->vb_queue);
-	mz0380_event_watch_stop(dev);
-	mz0380_nosg_capture_stop(dev);
 	mz0380_dma_quiesce(dev);
 	pci_clear_master(pci_dev);
 	return 0;
@@ -400,11 +362,18 @@ static int mz0380_resume(struct device *d)
 	if (!dev)
 		return 0;
 
-	if (dev->dma_armed || allow_bus_master || mz0380_dma_handshake)
-		pci_set_master(pci_dev);
-	/* The card may have cold-booted: redo the handshake, off this path. */
+	pci_set_master(pci_dev);
+	/*
+	 * The card may have cold-booted: redo the handshake, off this path, and
+	 * forget everything that was armed on it - including SET_AIC, without
+	 * which the encoder completes no frames (M33).
+	 */
 	mz0380_firmware_release(dev);
 	dev->mst3367_ready = false;
+	dev->aic_armed = false;
+	dev->mst_b2_48_valid = false;
+	dev->mst_committed_valid = false;
+	dev->signal_locked = false;
 	queue_work(MZ0380_SYSTEM_WQ, &dev->resume_work);
 	return 0;
 }
@@ -450,11 +419,6 @@ static int __init mz0380_init(void)
 {
 	int ret;
 
-	pr_info("mz0380 driver version %d.%d.%d loaded\n",
-		(MZ0380_VERSION_CODE >> 16) & 0xff,
-		(MZ0380_VERSION_CODE >> 8) & 0xff,
-		MZ0380_VERSION_CODE & 0xff);
-
 	ret = mz0380_proc_create();
 	if (ret < 0)
 		return ret;
@@ -472,7 +436,6 @@ static void __exit mz0380_fini(void)
 {
 	mz0380_proc_remove();
 	pci_unregister_driver(&mz0380_pci_driver);
-	pr_info("mz0380 driver unloaded\n");
 }
 
 module_init(mz0380_init);
