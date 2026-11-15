@@ -69,7 +69,83 @@ static struct iommu_domain *mz0380_iova_domain(struct mz0380_dev *dev)
 	return domain;
 }
 
-/* One physically contiguous block at one IOVA (window 1 and 3 slots). */
+/*
+ * A block the page allocator cannot supply in one piece: fragmented host
+ * pages behind the same contiguous card-visible IOVA, mapped one page at a
+ * time. b is published only after every page is mapped; on failure the pages
+ * already mapped are unmapped before any backing memory is released. This
+ * fallback is deliberately x86-only.
+ *
+ * From pull request #3 (elsell), where it served the 4 MiB stream buffers and
+ * the H.264 slots; adapted here to mz0380_map_block().
+ */
+static int mz0380_map_block_fragmented(struct mz0380_dev *dev,
+				       struct iommu_domain *domain,
+				       struct mz0380_dma_buf *b,
+				       dma_addr_t iova, size_t size)
+{
+	size_t off;
+	void *va;
+	int ret = -ENOMEM;
+
+	if (!IS_ENABLED(CONFIG_X86_64))
+		return -EOPNOTSUPP;
+	va = vzalloc(size);
+	if (!va)
+		return -ENOMEM;
+	for (off = 0; off < size; off += PAGE_SIZE) {
+		if (mz0380_fault_inject == MZ0380_INJECT_FRAGMENTED_FAIL &&
+		    off >= size / 2) {
+			ret = -ENOMEM;
+			goto fail;
+		}
+		if (iommu_iova_to_phys(domain, iova + off)) {
+			ret = -EBUSY;
+			goto fail;
+		}
+		ret = iommu_map(domain, iova + off,
+				page_to_phys(vmalloc_to_page((char *)va + off)),
+				PAGE_SIZE, IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
+		if (ret)
+			goto fail;
+	}
+	b->va = va;
+	b->dma = iova;
+	pr_info("%s: fragmented buffer mapped at IOVA 0x%llx (%zu bytes)\n",
+		dev->name, (unsigned long long)iova, size);
+	return 0;
+fail:
+	dev_warn(&dev->pci->dev,
+		 "fragmented mapping at IOVA 0x%llx failed %zu bytes in (%d); unmapping those and freeing the block\n",
+		 (unsigned long long)iova, off, ret);
+	if (off)
+		iommu_unmap(domain, iova, off);
+	vfree(va);
+	return ret;
+}
+
+/* How many of a window's slots are mapped each way, for /proc/mz0380-state. */
+void mz0380_dma_blocks_count(const struct mz0380_dma_buf *bufs, unsigned int n,
+			     unsigned int *contiguous, unsigned int *fragmented)
+{
+	unsigned int i;
+
+	*contiguous = 0;
+	*fragmented = 0;
+	for (i = 0; i < n; i++) {
+		if (!bufs[i].va)
+			continue;
+		if (is_vmalloc_addr(bufs[i].va))
+			(*fragmented)++;
+		else
+			(*contiguous)++;
+	}
+}
+
+/*
+ * One block at one IOVA (window 1 and 3 slots): physically contiguous when
+ * the allocator can supply it, fragmented pages otherwise.
+ */
 static int mz0380_map_block(struct mz0380_dev *dev,
 			    struct iommu_domain *domain,
 			    struct mz0380_dma_buf *b, u64 index, size_t size)
@@ -84,9 +160,12 @@ static int mz0380_map_block(struct mz0380_dev *dev,
 			(unsigned long long)iova);
 		return -EBUSY;
 	}
-	b->pages = alloc_pages(GFP_KERNEL | __GFP_ZERO, get_order(size));
+	if (mz0380_fault_inject != MZ0380_INJECT_FRAGMENTED &&
+	    mz0380_fault_inject != MZ0380_INJECT_FRAGMENTED_FAIL)
+		b->pages = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN |
+				       __GFP_NORETRY, get_order(size));
 	if (!b->pages)
-		return -ENOMEM;
+		return mz0380_map_block_fragmented(dev, domain, b, iova, size);
 	phys = page_to_phys(b->pages);
 	ret = iommu_map(domain, iova, phys, size, IOMMU_READ | IOMMU_WRITE,
 			GFP_KERNEL);
@@ -105,11 +184,14 @@ static int mz0380_map_block(struct mz0380_dev *dev,
 static void mz0380_unmap_block(struct iommu_domain *domain,
 			       struct mz0380_dma_buf *b, size_t size)
 {
-	if (!b->pages)
+	if (!b->va)
 		return;
 	if (b->dma && domain)
 		iommu_unmap(domain, b->dma, size);
-	__free_pages(b->pages, get_order(size));
+	if (is_vmalloc_addr(b->va))
+		vfree(b->va);
+	else
+		__free_pages(b->pages, get_order(size));
 	b->pages = NULL;
 	b->va = NULL;
 	b->dma = 0;

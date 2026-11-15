@@ -42,6 +42,24 @@ static int mz0380_proc_show(struct seq_file *m, void *v)
 	return 0;
 }
 
+/*
+ * M255: how the contiguous-or-fragmented slots ended up mapped, and how often
+ * a capture start was refused because bus mastering was off. A fix nobody can
+ * see taking effect is not verified.
+ */
+static void mz0380_dma_blocks_show(struct seq_file *m, struct mz0380_dev *dev)
+{
+	unsigned int hc, hf, ac, af;
+
+	mz0380_dma_blocks_count(dev->h264_bufs, ARRAY_SIZE(dev->h264_bufs),
+				&hc, &hf);
+	mz0380_dma_blocks_count(dev->audio_bufs, ARRAY_SIZE(dev->audio_bufs),
+				&ac, &af);
+	seq_printf(m, "  dma slots  : H.264 %u contiguous + %u fragmented, audio %u + %u; %u capture start(s) refused with bus mastering off; fault_inject=%u\n",
+		   hc, hf, ac, af, dev->busmaster_refusals,
+		   mz0380_fault_inject);
+}
+
 static void mz0380_state_pipeline(struct seq_file *m, struct mz0380_dev *dev)
 {
 	u32 fourcc = mz0380_current_pixelformat(dev);
@@ -80,6 +98,7 @@ static void mz0380_state_pipeline(struct seq_file *m, struct mz0380_dev *dev)
 		   atomic_read(&dev->irq_count),
 		   atomic_read(&dev->irq_video_count),
 		   (unsigned long long)READ_ONCE(dev->frame_event_drops));
+	mz0380_dma_blocks_show(m, dev);
 }
 
 static void mz0380_state_delivery(struct seq_file *m, struct mz0380_dev *dev)
