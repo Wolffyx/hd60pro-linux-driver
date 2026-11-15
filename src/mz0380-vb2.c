@@ -245,7 +245,10 @@ static int mz0380_start_streaming(struct vb2_queue *vq, unsigned int count)
 	 * Never spawn an encoder based only on the cached dma_armed flag.
 	 */
 	ret = pci_read_config_word(dev->pci, PCI_COMMAND, &command);
+	if (mz0380_fault_inject == MZ0380_INJECT_BUSMASTER_OFF)
+		command &= ~PCI_COMMAND_MASTER;
 	if (ret || command == 0xffff || !(command & PCI_COMMAND_MASTER)) {
+		dev->busmaster_refusals++;
 		dev_warn(&dev->pci->dev,
 			 "capture refused: PCI bus mastering is disabled or inaccessible\n");
 		ret = -EIO;

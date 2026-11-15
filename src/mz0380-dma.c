@@ -94,6 +94,11 @@ static int mz0380_map_block_fragmented(struct mz0380_dev *dev,
 	if (!va)
 		return -ENOMEM;
 	for (off = 0; off < size; off += PAGE_SIZE) {
+		if (mz0380_fault_inject == MZ0380_INJECT_FRAGMENTED_FAIL &&
+		    off >= size / 2) {
+			ret = -ENOMEM;
+			goto fail;
+		}
 		if (iommu_iova_to_phys(domain, iova + off)) {
 			ret = -EBUSY;
 			goto fail;
@@ -110,10 +115,31 @@ static int mz0380_map_block_fragmented(struct mz0380_dev *dev,
 		dev->name, (unsigned long long)iova, size);
 	return 0;
 fail:
+	dev_warn(&dev->pci->dev,
+		 "fragmented mapping at IOVA 0x%llx failed %zu bytes in (%d); unmapping those and freeing the block\n",
+		 (unsigned long long)iova, off, ret);
 	if (off)
 		iommu_unmap(domain, iova, off);
 	vfree(va);
 	return ret;
+}
+
+/* How many of a window's slots are mapped each way, for /proc/mz0380-state. */
+void mz0380_dma_blocks_count(const struct mz0380_dma_buf *bufs, unsigned int n,
+			     unsigned int *contiguous, unsigned int *fragmented)
+{
+	unsigned int i;
+
+	*contiguous = 0;
+	*fragmented = 0;
+	for (i = 0; i < n; i++) {
+		if (!bufs[i].va)
+			continue;
+		if (is_vmalloc_addr(bufs[i].va))
+			(*fragmented)++;
+		else
+			(*contiguous)++;
+	}
 }
 
 /*
@@ -134,8 +160,10 @@ static int mz0380_map_block(struct mz0380_dev *dev,
 			(unsigned long long)iova);
 		return -EBUSY;
 	}
-	b->pages = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN |
-			       __GFP_NORETRY, get_order(size));
+	if (mz0380_fault_inject != MZ0380_INJECT_FRAGMENTED &&
+	    mz0380_fault_inject != MZ0380_INJECT_FRAGMENTED_FAIL)
+		b->pages = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN |
+				       __GFP_NORETRY, get_order(size));
 	if (!b->pages)
 		return mz0380_map_block_fragmented(dev, domain, b, iova, size);
 	phys = page_to_phys(b->pages);

@@ -51,6 +51,11 @@ module_param_named(dma_iova_base, mz0380_dma_iova_base, ullong, 0444);
 MODULE_PARM_DESC(dma_iova_base,
 		 "4 GiB-aligned IOVA where the DMA windows start (default 0x100000000). Change only if the driver reports the range is already mapped");
 
+unsigned int mz0380_fault_inject;
+module_param_named(fault_inject, mz0380_fault_inject, uint, 0644);
+MODULE_PARM_DESC(fault_inject,
+		 "TEST ONLY (default 0). 1 = map the H.264 and audio slots from fragmented pages as if the contiguous allocation had failed; 2 = as 1, and fail that mapping half-way to exercise its unwinding (streaming is then unavailable); 3 = STREAMON behaves as if PCI bus mastering were off. 1 and 2 are read at load");
+
 bool mz0380_enable_audio;
 module_param_named(enable_audio, mz0380_enable_audio, bool, 0444);
 MODULE_PARM_DESC(enable_audio,

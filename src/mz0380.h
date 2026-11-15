@@ -219,6 +219,7 @@ struct mz0380_dev {
 	struct mz0380_dma_buf h264_bufs[MZ0380_STREAM_NR_BUFS];
 	struct mz0380_raw_buf raw_bufs[MZ0380_RAW_NR_BUFS];
 	struct mz0380_dma_buf audio_bufs[MZ0380_AUDIO_NR_SLOTS];
+	unsigned int busmaster_refusals;	/* STREAMONs refused (M255) */
 
 	/* What the node delivers: raw (one of three layouts) or H.264 (M218). */
 	bool deliver_raw;
@@ -398,6 +399,19 @@ extern bool mz0380_raw_full_range;
 extern unsigned int mz0380_h264_frame_divisor;
 extern unsigned int mz0380_post_skip;
 extern unsigned long long mz0380_dma_iova_base;
+
+/*
+ * fault_inject: makes the driver's rarely taken DMA paths reachable on
+ * demand, so scripts/mz0380-m255-dma-paths-test.sh can exercise them without
+ * fragmenting host memory or touching the card's PCI command register.
+ */
+enum mz0380_fault_inject {
+	MZ0380_INJECT_NONE = 0,
+	MZ0380_INJECT_FRAGMENTED = 1,		/* skip the contiguous allocation */
+	MZ0380_INJECT_FRAGMENTED_FAIL = 2,	/* ...and fail the mapping half-way */
+	MZ0380_INJECT_BUSMASTER_OFF = 3,	/* STREAMON reads bus mastering as off */
+};
+extern unsigned int mz0380_fault_inject;
 extern bool mz0380_aic_every_frame;
 extern unsigned int mz0380_aic_channels;
 extern unsigned int mz0380_aic_bits;
@@ -483,6 +497,8 @@ int mz0380_irq_request(struct mz0380_dev *dev);
 void mz0380_irq_release(struct mz0380_dev *dev);
 int mz0380_dma_setup(struct mz0380_dev *dev);
 void mz0380_dma_teardown(struct mz0380_dev *dev);
+void mz0380_dma_blocks_count(const struct mz0380_dma_buf *bufs, unsigned int n,
+			     unsigned int *contiguous, unsigned int *fragmented);
 int mz0380_dma_start(struct mz0380_dev *dev);
 void mz0380_dma_stop(struct mz0380_dev *dev);
 void mz0380_dma_quiesce(struct mz0380_dev *dev);
