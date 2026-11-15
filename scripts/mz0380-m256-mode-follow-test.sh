@@ -36,6 +36,11 @@ cd "$(dirname "$0")/.."
 U=${SUDO_USER:-}
 [ -n "$U" ] || { echo "run it with sudo from your desktop session"; exit 1; }
 UID_=$(id -u "$U")
+# The session's Wayland socket is not always wayland-0 (it was wayland-1 on the
+# day M256 was written), and kscreen-doctor fails silently on the wrong one -
+# which reads as "no such output". Take the socket that exists.
+WAYLAND=${WAYLAND:-$(basename "$(ls "/run/user/$UID_"/wayland-[0-9]* 2>/dev/null | grep -v '\.lock$' | head -1)")}
+[ -n "$WAYLAND" ] || { echo "no Wayland socket in /run/user/$UID_ - run this from your desktop session"; exit 1; }
 OUTPUT=${OUTPUT:-HDMI-A-1}
 MODE_A=${MODE_A:-1920x1080@60}
 MODE_B=${MODE_B:-1920x1080@30}
@@ -53,7 +58,7 @@ ok() { echo "ok $*"; }
 as_user() {
 	sudo -u "$U" env XDG_RUNTIME_DIR="/run/user/$UID_" \
 		DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UID_/bus" \
-		WAYLAND_DISPLAY="${WAYLAND:-wayland-0}" "$@"
+		WAYLAND_DISPLAY="$WAYLAND" "$@"
 }
 state() { cat /proc/mz0380-state 2>/dev/null; }
 spawns() { state | sed -n 's/.*enc spawns : \([0-9]*\).*/\1/p'; }
