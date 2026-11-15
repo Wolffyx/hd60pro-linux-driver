@@ -30,7 +30,8 @@ Applications choose the format. `YU12` is the default; OBS should be set to
   *without* `iommu=off` or `iommu=pt`. The card can only address the top 32
   bits of a DMA target, so the driver places every buffer at its own 4 GiB
   boundary through the IOMMU. Without one, the node appears but streaming is
-  refused with a message saying why.
+  refused with a message saying why. If the machine has to keep `iommu=pt`,
+  see [Keeping `iommu=pt`](#keeping-iommupt).
 - Kernel headers for the running kernel (`/lib/modules/$(uname -r)/build`).
 - The compiler that built your kernel. The Makefile reads that from the
   kernel's own config, so a clang-built kernel gets clang and a gcc-built one
@@ -54,6 +55,27 @@ DKMS rebuilds the module on every kernel upgrade. Without DKMS, `sudo make
 install` installs the current build for the running kernel only. Either way
 the module then loads by itself whenever the card is present, with no options.
 Remove it with `sudo make dkms-uninstall` (or `sudo make uninstall`).
+
+### Keeping `iommu=pt`
+
+A system booted with `iommu=pt` (common where devices are passed through to
+virtual machines) can keep it. Linux lets a single IOMMU group be switched to
+translated DMA while its device has no driver bound, and
+`scripts/mz0380-prepare-iommu.sh` does that for the card alone:
+
+```bash
+lspci -D -d 12ab:                                  # the card's address
+sudo modprobe -r mz0380
+sudo scripts/mz0380-prepare-iommu.sh 0000:04:00.0
+sudo modprobe mz0380
+```
+
+The card must be alone in its IOMMU group. The script refuses if it is not,
+if a driver is bound, or if the card is not idle and powered; it loads no
+driver and resets nothing. The setting does not survive a reboot, and the
+module loads by itself at boot, so the three `sudo` steps are needed once
+after each boot. `iommu=off` is different: there is no IOMMU to switch, and
+the script says so.
 
 Check that it came up:
 
@@ -92,7 +114,8 @@ ffplay -f v4l2 -input_format yuv420p -video_size 1920x1080 "$NODE"
 
 **OBS**: add a *Video Capture Device (V4L2)* source, pick *HD60 Pro HDMI
 capture*, and set *Video Format* to **NV12**. Turn off *Deactivate when not
-showing* - see the next section for why.
+showing* - see the next section for why. If the preview lags behind the
+source, turn off *Use Buffering* in the same dialog.
 
 **Record** with ffmpeg, raw in and H.264 out through your GPU or CPU:
 
@@ -190,7 +213,9 @@ compare `modinfo -F vermagic mz0380.ko` with `uname -r`), a module signature
 rejection, or an unknown subsystem ID (the log lists the `card=` override).
 
 **`streaming unavailable` / `no IOMMU domain`** - enable VT-d/AMD-Vi in the
-firmware setup and remove `iommu=off` / `iommu=pt` from the kernel command line.
+firmware setup and remove `iommu=off` / `iommu=pt` from the kernel command
+line, or keep `iommu=pt` and switch the card alone - see
+[Keeping `iommu=pt`](#keeping-iommupt).
 
 **`card handshake failed` or commands time out (`-110`)** - the card's
 firmware is not answering: it is wedged (see the spawn budget) or still
