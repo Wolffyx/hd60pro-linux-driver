@@ -56,6 +56,46 @@ install` installs the current build for the running kernel only. Either way
 the module then loads by itself whenever the card is present, with no options.
 Remove it with `sudo make dkms-uninstall` (or `sudo make uninstall`).
 
+### NixOS
+
+NixOS has no `/lib/modules/.../build` and no DKMS, so use the flake instead of
+the Makefile targets. It builds the module for whatever kernel the system
+runs (`boot.kernelPackages`) and rebuilds it with every kernel change:
+
+```nix
+# flake.nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.mz0380.url = "github:Wolffyx/hd60pro-linux-driver";
+  inputs.mz0380.inputs.nixpkgs.follows = "nixpkgs";
+
+  outputs = { nixpkgs, mz0380, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        ./configuration.nix
+        mz0380.nixosModules.default
+        { hardware.mz0380.enable = true; }
+      ];
+    };
+  };
+}
+```
+
+After `nixos-rebuild switch` the module loads by itself when the card is
+present (or now, with `sudo modprobe mz0380`). Without flakes, add the package
+directly from a checkout of this repository:
+
+```nix
+boot.extraModulePackages = [
+  (config.boot.kernelPackages.callPackage /path/to/hd60pro-linux-driver/nix/package.nix { })
+];
+```
+
+The IOMMU requirement is the same as everywhere else; the NixOS module warns
+at build time if `boot.kernelParams` contains `iommu=pt` or `iommu=off`. The
+flake has been build-tested against nixpkgs' default kernel but not yet run
+on a NixOS machine with the card.
+
 ### Keeping `iommu=pt`
 
 A system booted with `iommu=pt` (common where devices are passed through to
