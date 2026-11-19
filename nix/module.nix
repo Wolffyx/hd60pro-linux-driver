@@ -17,7 +17,12 @@ in
       (config.boot.kernelPackages.callPackage ./package.nix { })
     ];
 
-    warnings = lib.optional (badIommu != [ ]) ''
+    # Mainline (and the NixOS kernel) leaves CONFIG_INTEL_IOMMU_DEFAULT_ON off,
+    # so on Intel VT-d stays disabled without this and the driver finds no
+    # IOMMU domain. Ignored on AMD, where AMD-Vi is on by default.
+    boot.kernelParams = [ "intel_iommu=on" ];
+
+    warnings =lib.optional (badIommu != [ ]) ''
       hardware.mz0380: boot.kernelParams contains ${lib.concatStringsSep " " badIommu}.
       The HD60 Pro needs a translating IOMMU; with this setting the video node
       appears but streaming is refused. See "Keeping iommu=pt" in the driver's
