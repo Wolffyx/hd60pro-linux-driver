@@ -10,7 +10,7 @@ let
 
   # Only what the user set: the driver's built-in defaults are the validated
   # configuration, so nothing is written for an option left alone.
-  params = lib.optionalAttrs cfg.enableAudio { enable_audio = true; } // cfg.moduleOptions;
+  params = lib.optionalAttrs (!cfg.enableAudio) { enable_audio = false; } // cfg.moduleOptions;
   render = v: if lib.isBool v then (if v then "1" else "0") else toString v;
   optionsLine = lib.concatStringsSep " " (lib.mapAttrsToList (k: v: "${k}=${render v}") params);
 in
@@ -18,11 +18,16 @@ in
   options.hardware.mz0380 = {
     enable = lib.mkEnableOption "the mz0380 driver for the Elgato Game Capture HD60 Pro";
 
-    enableAudio = lib.mkEnableOption ''
-      the card's HDMI audio as an ALSA capture device (module parameter
-      enable_audio, experimental). Takes effect when the module is next loaded,
-      i.e. after a reboot or `modprobe -r mz0380 && modprobe mz0380`
-    '';
+    enableAudio = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether to offer the card's HDMI audio as an ALSA capture device
+        (module parameter enable_audio, on by default in the driver). Set to
+        false for a video-only card. Takes effect when the module is next
+        loaded, i.e. after a reboot or `modprobe -r mz0380 && modprobe mz0380`.
+      '';
+    };
 
     moduleOptions = lib.mkOption {
       type = with lib.types; attrsOf (oneOf [ bool int str ]);

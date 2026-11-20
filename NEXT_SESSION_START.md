@@ -57,7 +57,9 @@ next capture.
 Any hardware run: OBS closed (it grabs the node at load and spends spawns).
 `sudo scripts/mz0380-m247-verify.sh` is the regression check (3 spawns;
 `fourcc` and `coldtrace` modes are zero-spawn). No Claude attribution in
-commit or PR text.
+commit or PR text. Branch from `dev` and PR into `dev`; a `dev` -> `main` PR
+is a release (bump first with `scripts/mz0380-version.sh X.Y.Z`; merging
+publishes the tag - README "Releases and branches").
 
 1. **M254 done**: DSLR stays on CSC bypass after M253 (`0x48=b0`, YUV422,
    `0x92=00`) on kernel 7.2.11. Open side question: the idle `csc` read gave
@@ -67,8 +69,11 @@ commit or PR text.
    byte order (little-endian), 48 kHz rate and independent stereo all
    correct, no driver change. Only left/right order is unproven - needs one
    run of `sudo SECS=20 scripts/mz0380-m246-audio-test.sh` with a
-   hard-panned source (the per-second table must alternate). After that,
-   decide whether `enable_audio` defaults to 1.
+   hard-panned source (the per-second table must alternate).
+   `enable_audio` now defaults to 1 (on `dev`, for v0.3.0). **Release gate:**
+   run `sudo scripts/mz0380-m247-verify.sh` once with that default before
+   the `dev` -> `main` PR - the video regression check has only ever run with
+   the video-only SET_AIC layout. If it fails, flip the default back.
 3. **Suspend/resume and `.shutdown`** (M245, still untested). M247 fixed one
    resume defect statically: SET_AIC is re-sent after a card cold boot.
 4. **M232** (encoder goes silent) - not reproduced; suspect two consumers.
@@ -84,8 +89,9 @@ commit or PR text.
      that is expected, NixOS generates modprobe config itself.
    - Ping the issue when audio v1 is ready for testing (promised end of this
      week or next).
-   - A release system (tags + release notes), so Nix users can pin a release
-     instead of a branch.
+   - Release system: done (`dev` branch, `.github/workflows/release.yml`,
+     tags `vX.Y.Z`). First release v0.3.0 once the gate in item 2 passes;
+     then tell the issue Nix users can pin `.../v0.3.0`.
 
 ## Running it
 

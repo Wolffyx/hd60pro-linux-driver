@@ -17,8 +17,15 @@
 
 stdenv.mkDerivation {
   pname = "mz0380";
-  # Keep in step with MZ0380_VERSION in src/mz0380.h.
-  version = "0.2.0-${kernel.version}";
+  # MZ0380_VERSION in src/mz0380.h is the one source for the version.
+  version =
+    let
+      lines = lib.splitString "\n" (builtins.readFile ../src/mz0380.h);
+      hit = lib.findFirst (m: m != null) null (
+        map (builtins.match ''#define MZ0380_VERSION[[:space:]]+"(.*)"'') lines
+      );
+    in
+    "${lib.head hit}-${kernel.version}";
 
   # Only what the build reads, so editing docs or scripts rebuilds nothing.
   src = lib.fileset.toSource {
