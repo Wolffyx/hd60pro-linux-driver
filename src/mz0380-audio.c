@@ -43,10 +43,21 @@ struct mz0380_pcm {
 	unsigned int period_pos;	/* bytes since the last period      */
 };
 
+/*
+ * The ring is the card's private data, so it lives exactly as long as the
+ * card. dev->snd_pcm is only how the drain worker finds it, and unregister
+ * clears it BEFORE snd_card_free(), which stops a running capture through
+ * .trigger - so the callbacks must never go through dev->snd_pcm (M259).
+ */
+static struct mz0380_pcm *to_pcm(struct snd_pcm_substream *ss)
+{
+	return ss->pcm->card->private_data;
+}
+
 static int mz0380_pcm_open(struct snd_pcm_substream *ss)
 {
 	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 	struct snd_pcm_runtime *rt = ss->runtime;
 	unsigned int rate = mz0380_aic_freq;
 	unsigned int chans = mz0380_aic_channels;
@@ -94,7 +105,7 @@ static int mz0380_pcm_open(struct snd_pcm_substream *ss)
 static int mz0380_pcm_close(struct snd_pcm_substream *ss)
 {
 	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 	unsigned long flags;
 
 	spin_lock_irqsave(&pcm->lock, flags);
@@ -108,8 +119,7 @@ static int mz0380_pcm_close(struct snd_pcm_substream *ss)
 static int mz0380_pcm_hw_params(struct snd_pcm_substream *ss,
 				struct snd_pcm_hw_params *p)
 {
-	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 	unsigned long flags;
 
 	spin_lock_irqsave(&pcm->lock, flags);
@@ -122,7 +132,7 @@ static int mz0380_pcm_hw_params(struct snd_pcm_substream *ss,
 static int mz0380_pcm_prepare(struct snd_pcm_substream *ss)
 {
 	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 	unsigned long flags;
 
 	spin_lock_irqsave(&pcm->lock, flags);
@@ -136,7 +146,7 @@ static int mz0380_pcm_prepare(struct snd_pcm_substream *ss)
 static int mz0380_pcm_trigger(struct snd_pcm_substream *ss, int cmd)
 {
 	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 
 	/* Called with the stream lock held, so no irqsave needed on top. */
 	switch (cmd) {
@@ -160,8 +170,7 @@ static int mz0380_pcm_trigger(struct snd_pcm_substream *ss, int cmd)
 
 static snd_pcm_uframes_t mz0380_pcm_pointer(struct snd_pcm_substream *ss)
 {
-	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 
 	return bytes_to_frames(ss->runtime, READ_ONCE(pcm->hw_ptr));
 }
