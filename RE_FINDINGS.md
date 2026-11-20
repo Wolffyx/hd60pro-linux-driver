@@ -16081,3 +16081,43 @@ it, may be more than a same-size rate change needs in raw mode. Accepting the
 new rate without a restart would cost no spawn at all. Not pursued: one
 direction, one mode family (60/30 share a line length; 50/25 do not), and
 nothing known about H.264, whose rate control is set from the frame rate.
+
+## M257 (hardware, 2026-11-20): HDMI audio verified with a source that has sound
+
+M246 proved the transport but only ever saw digital silence, because its
+source embedded no audio. This run used a phone over HDMI playing a video,
+five runs of `scripts/mz0380-m246-audio-test.sh` (`SECS=20`) on one power
+cycle (spawns 1-5), kernel 7.3.
+
+The test's WAV analysis gained two checks for the questions M246 left open:
+
+- **Byte order**: real audio is dominated by low frequencies, so neighbouring
+  samples are close; byte-swapped samples look like white noise. The script
+  measures that roughness (RMS of sample-to-sample steps over RMS level) on
+  the louder channel as delivered and byte-swapped, and the smoother reading
+  wins. Synthetic files: 0.06 correct vs 1.48 swapped, both directions right.
+- **Channel order**: per-second RMS of each channel, for a left/right test.
+
+Every run, same counters: ~2300 audio events and slots, 0 empty, 0 overrun,
+0 bad token, max extent 4096, no IOMMU faults; ALSA delivered exactly 20 s
+(3842048 bytes, 160 periods). The ~1000-1400 refused pushes are the audio
+that arrived before arecord opened.
+
+| question | result |
+|---|---|
+| content | the video's audio (operator listened); smooth waveform, peaks 80-300 Hz |
+| byte order | little-endian is correct: roughness 0.22-0.26 as delivered vs 1.36-1.41 swapped |
+| rate | 192000 bytes/s = 48 kHz x 2 ch x 16 bit, as SET_AIC asks |
+| stereo | independent channels: L == R on only 29.7% of samples with a stereo video (99.6% with a near-mono one), side signal up to ~900 RMS |
+| left/right order | **not proven** - no hard-panned source was captured |
+
+One run was believed to play the left/right tone file and showed none of its
+440/660 Hz tones under any reading of the bytes (16-bit stereo, 32-bit mono
+and stereo, 16-bit mono at 96 kHz). The phone was in fact playing a video, so
+that was not a fault. Detecting the tones (Goertzel per second) is a cheap
+check that the intended source is the one playing.
+
+No driver change: `mz0380_audio_push()` copies the card's bytes unchanged and
+labels them S16_LE stereo, which is correct. Left/right follows the HDMI and
+I2S convention (first slot = left). Still open: one run with a hard-panned
+source, then whether `enable_audio` should default to 1.
