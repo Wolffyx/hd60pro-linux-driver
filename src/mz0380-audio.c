@@ -16,7 +16,8 @@
  *  while something is (or, with the persistent pipeline, has been) capturing
  *  video: a capture opened on its own waits for the first slot.
  *
- *  Opt-in with enable_audio=1 until verified on hardware.
+ *  On by default since M257 verified it on hardware; enable_audio=0 turns it
+ *  off.
  */
 
 #include "mz0380.h"

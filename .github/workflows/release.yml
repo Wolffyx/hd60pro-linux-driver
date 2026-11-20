@@ -1,0 +1,52 @@
+# Releases come from main, and only main: work lands on dev, and merging
+# dev into main publishes v<version> (MZ0380_VERSION in src/mz0380.h).
+#
+# On a pull request into main this only checks: the module builds and the
+# version has not been released yet. On the push that the merge makes, it
+# runs the same checks and then tags and publishes the release, with notes
+# GitHub generates from the pull requests merged since the last tag.
+name: release
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read the version
+        id: version
+        run: echo "tag=v$(scripts/mz0380-version.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Require a version that is not released yet
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null; then
+            echo "::error::${{ steps.version.outputs.tag }} is already released. Bump it on dev first: scripts/mz0380-version.sh X.Y.Z"
+            exit 1
+          fi
+
+      - name: Build the module
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q "linux-headers-$(uname -r)"
+          make
+
+      - name: Publish the release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --target "$GITHUB_SHA" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes
