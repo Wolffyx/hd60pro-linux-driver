@@ -15425,7 +15425,8 @@ correct output, not a defect - the card's capture app clocks I2S silence at the
 requested rate, which is exactly what arrived. What remains unverified is only
 the non-zero case: that a source WITH audio produces the expected samples
 (channel order, endianness). Test with a PC or console output when one is
-available. The competing-daemons caveat stands for any future audio run: cold
+available. [Refuted by M258: later copies cannot reach I2S 0 while the first
+holds it, so no cold boot is needed between audio runs.] The competing-daemons caveat stands for any future audio run: cold
 boot first, because each audio-enabled load leaves another capture app running.
 
 ## M247 (2026-10-12): the cleanup - 21k lines to 10k, the card told the same thing, and the UX gaps closed
@@ -16121,3 +16122,47 @@ No driver change: `mz0380_audio_push()` copies the card's bytes unchanged and
 labels them S16_LE stereo, which is correct. Left/right follows the HDMI and
 I2S convention (first slot = left). Still open: one run with a hard-panned
 source, then whether `enable_audio` should default to 1.
+
+## M258 (static, 2026-11-20): duplicate capture apps on the card are harmless
+
+M246 warned that every audio-enabled load leaves another
+`capture_app_infinite` running on the card, all "competing for I2S 0", and
+that only a mains-off cold boot clears them. The first half is right, the
+second half is not.
+
+`audio_capture_mgr` (re-dump/acm.ann.txt, 0x8a5c..0x8b50) runs
+`./capture_app_infinite -D -P 5 -d 0 ...` through `system()` on every op 0x2a
+with index 0 and on == 1. It keeps no "already running" state, and it has no
+stop path at all: its strings and imports contain no kill, and op 0x07 is
+"unknow command". So the host cannot stop an app once launched, and every
+audio-layout SET_AIC on one card power cycle adds a process.
+
+`capture_app_infinite` itself (re-dump/fw/yuan_demo_sdi, no `kill` import):
+
+    90ac  -D given  -> daemon()
+    9134  write_pid(/tmp/pid_audio_running)
+    9140  signal(SIGTERM, ...), signal(...)
+    9190  snd_pcm_open(&h, "hw:0,0", SND_PCM_STREAM_CAPTURE, mode 0)
+    9198  r0 < 0 -> 9370: printf(snd_strerror), puts("STOP ..."), return 0 from main
+    970c  MemBroker_GetMemory, the capture loop - only after the open succeeded
+
+Mode 0 is a blocking open. With the first app holding the card's only I2S 0
+capture substream, ALSA makes a later blocking open sleep until the holder
+closes. If the card's ALSA returned -EBUSY instead, the app would print,
+return and exit. Either way a later copy never reads I2S 0 or allocates its
+capture memory while the first runs. It is a sleeping process, or none. The
+only side effect is that it overwrites `/tmp/pid_audio_running`, which
+nothing on the host reads.
+
+Hardware agrees: M257 made five audio-enabled loads on one power cycle, and
+every run had clean counters and the right content.
+
+Consequences:
+
+- No driver change. The video-only SET_AIC layout stays as it is (it never
+  launches the app), and an audio load may send the launching layout every
+  time.
+- A power cycle is NOT needed between audio runs. The spawn budget is still
+  the only reason to power-cycle.
+- Unverified on hardware: which of the two outcomes (sleep or exit) the
+  card's kernel gives. It does not matter for the host.
