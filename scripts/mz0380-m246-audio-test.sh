@@ -118,6 +118,31 @@ elif rms > 20:
     print("  VERDICT: real signal. Listen to it: " + sys.argv[1])
 else:
     print("  VERDICT: near-silent but not zero - listen before concluding")
+if rms <= 20 or ch != 2:
+    sys.exit(0)
+
+# Byte order: real audio is dominated by low frequencies, so neighbouring
+# samples are close (step/level well under 1). Byte-swapped samples look like
+# white noise (~1.4). Whichever reading is smoother is the true byte order.
+def roughness(s):
+    lvl = math.sqrt(sum(x * x for x in s) / len(s)) or 1
+    return math.sqrt(sum((s[i] - s[i - 1]) ** 2 for i in range(1, len(s))) / len(s)) / lvl
+left, right = a[0::2], a[1::2]
+sw = array.array('h', a); sw.byteswap()
+loud = 0 if sum(x * x for x in left) >= sum(x * x for x in right) else 1
+r_as, r_sw = roughness(a[loud::2]), roughness(sw[loud::2])
+print(f"  byte order: roughness as delivered {r_as:.2f}, byte-swapped {r_sw:.2f}")
+print("  VERDICT: byte order " + ("OK (little-endian as labelled)" if r_as < r_sw
+      else "WRONG - the card delivers big-endian; swap in mz0380_audio_push()"))
+
+# Channel order: per-second level of each channel. Play a left/right test
+# (left only, then right only) and the active column must follow the source.
+def level(s):
+    return math.sqrt(sum(x * x for x in s) / max(len(s), 1))
+rate = w.getframerate()
+print("  second   ch0(L)    ch1(R)")
+for t in range(n // rate):
+    print(f"  {t:4d}  {level(left[t*rate:(t+1)*rate]):8.0f}  {level(right[t*rate:(t+1)*rate]):8.0f}")
 EOF
 
 scripts/mz0380-spawns.sh commit || true

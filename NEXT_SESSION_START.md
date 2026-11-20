@@ -63,9 +63,12 @@ commit or PR text.
    `0x92=00`) on kernel 7.2.11. Open side question: the idle `csc` read gave
    0x48=00 with the source in HDMI mode, and 0x0e read `b0` - check whether
    the idle read path is shifted before trusting idle 0x48 reads.
-2. **M246 audio with a source that has sound** (`sudo
-   scripts/mz0380-m246-audio-test.sh`): channel order and byte order are the
-   only open questions.
+2. **Audio: M257 verified it with sound** (phone over HDMI, 5 runs): content,
+   byte order (little-endian), 48 kHz rate and independent stereo all
+   correct, no driver change. Only left/right order is unproven - needs one
+   run of `sudo SECS=20 scripts/mz0380-m246-audio-test.sh` with a
+   hard-panned source (the per-second table must alternate). After that,
+   decide whether `enable_audio` defaults to 1.
 3. **Suspend/resume and `.shutdown`** (M245, still untested). M247 fixed one
    resume defect statically: SET_AIC is re-sent after a card cold boot.
 4. **M232** (encoder goes silent) - not reproduced; suspect two consumers.
