@@ -129,7 +129,9 @@ static int mz0380_stream_stop_all(struct mz0380_dev *dev,
  * M246: with audio enabled, cmd+4 is the audio index and cmd+5 the channel
  * count (Windows: index | chs << 8 | 16 << 16), which makes the card launch its
  * capture program. Each SET_AIC starts another one, so a video-only load keeps
- * the layout every video run was validated with.
+ * the layout every video run was validated with. The extra copies are
+ * harmless (M258): a later one blocks in its open of the card's I2S device, or
+ * exits, while the first holds it.
  */
 static int mz0380_stream_set_aic(struct mz0380_dev *dev)
 {
