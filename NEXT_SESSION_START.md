@@ -70,6 +70,18 @@ commit or PR text.
    resume defect statically: SET_AIC is re-sent after a card cold boot.
 4. **M232** (encoder goes silent) - not reproduced; suspect two consumers.
    `scripts/mz0380-node-holders.sh` names them.
+5. **NixOS follow-ups (issue #4, kept open)**. The flake works on hardware:
+   rubenturen streams on NixOS 6.18.44, Intel, once the module set
+   `intel_iommu=on` (first Intel IOMMU run). Audio also shows up in OBS as a
+   separate input. Left to do:
+   - NixOS options for the module parameters, at least `enable_audio` (e.g.
+     `hardware.mz0380.enableAudio`, written through `boot.extraModprobeConfig`).
+     The flake installs no `/etc/modprobe.d/mz0380.conf`; that is expected,
+     NixOS generates modprobe config itself.
+   - Ping the issue when audio v1 is ready for testing (promised end of this
+     week or next).
+   - A release system (tags + release notes), so Nix users can pin a release
+     instead of a branch.
 
 ## Running it
 

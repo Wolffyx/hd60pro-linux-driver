@@ -55,7 +55,7 @@ static struct iommu_domain *mz0380_iova_domain(struct mz0380_dev *dev)
 	}
 	if (!domain) {
 		dev_err(&dev->pci->dev,
-			"no IOMMU domain for the device. This card only latches the high 32 bits of a DMA target, so it needs IOMMU translation: enable VT-d/AMD-Vi and boot without iommu=off or iommu=pt\n");
+			"no IOMMU domain for the device. This card only latches the high 32 bits of a DMA target, so it needs IOMMU translation: enable VT-d/AMD-Vi and boot without iommu=off or iommu=pt (Intel: most kernels also need intel_iommu=on)\n");
 		return NULL;
 	}
 	if (domain->type != IOMMU_DOMAIN_DMA &&

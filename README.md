@@ -27,7 +27,9 @@ Applications choose the format. `YU12` is the default; OBS should be set to
 
 - A supported HD60 Pro in a PCIe slot (see [Supported cards](#supported-cards)).
 - **A translating IOMMU** - VT-d or AMD-Vi enabled in firmware, and Linux booted
-  *without* `iommu=off` or `iommu=pt`. The card can only address the top 32
+  *without* `iommu=off` or `iommu=pt`. On Intel, most kernels also need
+  `intel_iommu=on` on the command line: VT-d stays off unless the kernel was
+  built with `CONFIG_INTEL_IOMMU_DEFAULT_ON`. The card can only address the top 32
   bits of a DMA target, so the driver places every buffer at its own 4 GiB
   boundary through the IOMMU. Without one, the node appears but streaming is
   refused with a message saying why. If the machine has to keep `iommu=pt`,
@@ -55,6 +57,49 @@ DKMS rebuilds the module on every kernel upgrade. Without DKMS, `sudo make
 install` installs the current build for the running kernel only. Either way
 the module then loads by itself whenever the card is present, with no options.
 Remove it with `sudo make dkms-uninstall` (or `sudo make uninstall`).
+
+### NixOS
+
+NixOS has no `/lib/modules/.../build` and no DKMS, so use the flake instead of
+the Makefile targets. It builds the module for whatever kernel the system
+runs (`boot.kernelPackages`) and rebuilds it with every kernel change:
+
+```nix
+# flake.nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.mz0380.url = "github:Wolffyx/hd60pro-linux-driver";
+  inputs.mz0380.inputs.nixpkgs.follows = "nixpkgs";
+
+  outputs = { nixpkgs, mz0380, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        ./configuration.nix
+        mz0380.nixosModules.default
+        { hardware.mz0380.enable = true; }
+      ];
+    };
+  };
+}
+```
+
+After `nixos-rebuild switch` the module loads by itself when the card is
+present (or now, with `sudo modprobe mz0380`). Without flakes, add the package
+directly from a checkout of this repository:
+
+```nix
+boot.extraModulePackages = [
+  (config.boot.kernelPackages.callPackage /path/to/hd60pro-linux-driver/nix/package.nix { })
+];
+```
+
+The IOMMU requirement is the same as everywhere else. The NixOS module adds
+`intel_iommu=on` to `boot.kernelParams` (needed on Intel, ignored on AMD), so
+reboot after the first `nixos-rebuild switch`; with the non-flake snippet, add
+it yourself. The module also warns at build time if `boot.kernelParams`
+contains `iommu=pt` or `iommu=off`. The
+flake has been build-tested against nixpkgs' default kernel but not yet run
+on a NixOS machine with the card.
 
 ### Keeping `iommu=pt`
 
@@ -224,7 +269,9 @@ rejection, or an unknown subsystem ID (the log lists the `card=` override).
 
 **`streaming unavailable` / `no IOMMU domain`** - enable VT-d/AMD-Vi in the
 firmware setup and remove `iommu=off` / `iommu=pt` from the kernel command
-line, or keep `iommu=pt` and switch the card alone - see
+line. On Intel, also add `intel_iommu=on`: without it most kernels leave VT-d
+off even when the firmware enables it (`sudo dmesg | grep -i dmar` then shows
+only `DMAR-IR` lines and no `DMAR: IOMMU enabled`). Or keep `iommu=pt` and switch the card alone - see
 [Keeping `iommu=pt`](#keeping-iommupt).
 
 **`card handshake failed` or commands time out (`-110`)** - the card's

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Give one HD60 Pro a translating IOMMU domain on a system booted with
 # iommu=pt, without changing the system-wide default.
 #
