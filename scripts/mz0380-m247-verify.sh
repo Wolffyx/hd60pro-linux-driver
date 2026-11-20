@@ -11,6 +11,9 @@
 #   sudo PAUSE=10 scripts/mz0380-m247-verify.sh   # no prompts, fixed waits
 #   sudo scripts/mz0380-m247-verify.sh fourcc     # YUYV check only, module loaded
 #   sudo scripts/mz0380-m247-verify.sh coldtrace  # cold bring-up trace, no power cycle, 0 spawns
+#   sudo BASELINE=none scripts/mz0380-m247-verify.sh  # skip the baseline load and
+#        diff (2 spawns): for a kernel the baseline is not built for, or a
+#        deliberate command change such as audio on by default
 #
 # Phase 1  the card is told the same thing.
 #   The SAME capture scenario runs on this tree and on the baseline module
@@ -229,7 +232,8 @@ if [ "${1:-}" = coldtrace ]; then
 	exit 0
 fi
 
-[ -f "$BASELINE" ] || { echo "no baseline module at $BASELINE"; exit 1; }
+[ "$BASELINE" = none ] || [ -f "$BASELINE" ] ||
+	{ echo "no baseline module at $BASELINE (BASELINE=none skips the comparison)"; exit 1; }
 make >/dev/null || { echo "build failed"; exit 1; }
 SPAWNS=$(scripts/mz0380-spawns.sh 2>/dev/null | grep -oE 'cycle: [0-9]+' | grep -oE '[0-9]+')
 scripts/mz0380-spawns.sh 2>/dev/null | tail -3
@@ -237,6 +241,10 @@ scripts/mz0380-spawns.sh 2>/dev/null | tail -3
 	echo "  NOTE: not a fresh power cycle - the m247 load may keep the receiver, so its trace has no bring-up to compare"
 
 trace_run m247 ./mz0380.ko
+if [ "$BASELINE" = none ]; then
+	echo
+	echo "=== phase 1 result: skipped (BASELINE=none) - no comparison with the baseline ==="
+else
 trace_run baseline "$BASELINE"
 
 echo
@@ -248,6 +256,7 @@ for op in 0x29 0x2d 0x31 0x02 0x08 0x04 0x2a 0x06 0x07; do
 	diff <(grep "op=$op" "$OUT/baseline.norm") <(grep "op=$op" "$OUT/m247.norm") > /dev/null ||
 		echo "  !! op $op arguments differ - check $OUT/m247.diff"
 done
+fi
 
 echo
 echo "=== phase 2: this tree, receiver kept; zero spawns unless stated ==="
