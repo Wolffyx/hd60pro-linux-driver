@@ -34,6 +34,14 @@
 # enable_video=0, so no V4L2 node appears for the desktop to open and pin the
 # module. Nothing is ever uploaded - the card runs its own flash image. No
 # STREAMON, no SET_VIC, no encoder spawn.
+#
+# Then a second cycle with the defaults (video node + ALSA device) that
+# unbinds the card while arecord is capturing from it - the M259 path, where a
+# NULL ring pointer in .trigger oopsed with the stream lock held and hung
+# PipeWire until a power cycle. Unbind must return at once (the ALSA card is
+# freed when its last handle closes, not waited for), arecord must be told the
+# card is gone, and the kernel must stay quiet. Still zero spawns: nothing
+# streams video, and audio alone starts nothing on the card.
 set -u
 cd "$(dirname "$0")/.."
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
@@ -77,3 +85,60 @@ if lsmod | grep -qE "^mz0380"; then
 fi
 
 echo "clean: loaded, bound, unloaded, no kernel complaints, module gone."
+
+echo
+echo "=== audio: unbind with a capture running (M259) ==="
+dmesg -C
+insmod "$MZKO" || fail "insmod with the defaults failed"
+sleep 2
+grep -q mz0380 /proc/asound/cards ||
+	fail "no ALSA card registered (enable_audio=0 in /etc/modprobe.d?)"
+PCI=$(ls /sys/bus/pci/drivers/mz0380/ | grep -m1 ':')
+[ -n "$PCI" ] || fail "card not bound after insmod"
+
+AREC_LOG=/tmp/mz0380-smoke-arecord.log
+arecord -q -D hw:CARD=mz0380,DEV=0 -f S16_LE -c 2 -r 48000 -t raw /dev/null \
+	> "$AREC_LOG" 2>&1 &
+AREC=$!
+sleep 1
+kill -0 "$AREC" 2>/dev/null ||
+	fail "arecord could not capture: $(cat "$AREC_LOG") - is PipeWire holding the device?"
+starts=$(sed -n 's/^  audio pcm .* \([0-9]*\) starts.*/\1/p' /proc/mz0380-state)
+[ "${starts:-0}" -ge 1 ] || fail "the capture was opened but never started"
+
+echo "unbinding $PCI with arecord (pid $AREC) capturing"
+( echo "$PCI" > /sys/bus/pci/drivers/mz0380/unbind ) &
+UNBIND=$!
+for _ in $(seq 1 10); do
+	kill -0 "$UNBIND" 2>/dev/null || break
+	sleep 1
+done
+kill -0 "$UNBIND" 2>/dev/null &&
+	fail "unbind still blocked after 10 s with a capture open. Check dmesg; if it oopsed, power-cycle - do not rmmod -f"
+wait "$UNBIND" || fail "unbind returned an error"
+
+for _ in $(seq 1 10); do
+	kill -0 "$AREC" 2>/dev/null || break
+	sleep 1
+done
+if kill -0 "$AREC" 2>/dev/null; then
+	kill "$AREC"
+	fail "arecord kept running after the card was removed - it was never told"
+fi
+echo "arecord ended with: $(tail -1 "$AREC_LOG")"
+
+# A closed handle drops its module reference; a desktop probe of the video
+# node may hold one a moment longer.
+for _ in $(seq 1 10); do
+	rmmod mz0380 2>/dev/null && break
+	sleep 1
+done
+lsmod | grep -qE "^mz0380" &&
+	fail "module still present 10 s after unbind: $(lsmod | grep '^mz0380')"
+
+if dmesg | grep -qE "BUG:|Oops|kernel NULL pointer|Call Trace|WARNING:|general protection"; then
+	dmesg | grep -E -A 5 "BUG:|Oops|kernel NULL pointer|Call Trace|WARNING:|general protection" | head -40
+	fail "kernel complained while removing the card under a capture"
+fi
+
+echo "clean: unbind returned with a capture open, arecord was told, module gone."

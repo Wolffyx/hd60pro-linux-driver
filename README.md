@@ -384,7 +384,10 @@ the [releases page](https://github.com/Wolffyx/hd60pro-linux-driver/releases).
 Work happens on `dev`:
 
 1. Branch from `dev`, open the pull request against `dev`.
-2. When `dev` is ready to ship, bump the version on `dev`
+2. When `dev` is ready to ship, run the hardware checks on it with OBS
+   closed - `sudo scripts/mz0380-m85-unload-smoke.sh` (zero spawns, includes
+   removing the card under a running audio capture) and `sudo
+   BASELINE=none scripts/mz0380-m247-verify.sh` - then bump the version on `dev`
    (`scripts/mz0380-version.sh X.Y.Z`, which sets `src/mz0380.h` and
    `dkms.conf`) and open a pull request from `dev` into `main`.
 3. Merging it publishes `vX.Y.Z` with release notes

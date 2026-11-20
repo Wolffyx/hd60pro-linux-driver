@@ -76,8 +76,11 @@ publishes the tag - README "Releases and branches").
    the video-only SET_AIC layout. If it fails, flip the default back.
    First attempt (M259) oopsed on unload with OBS's audio capture open -
    fixed on `fix/release-gate`; re-run after a full power cycle, with
-   `BASELINE=none` (the 0.1.0 baseline module only loads on 7.2.9). Also try
-   one unload with OBS still capturing audio: that is the M259 path.
+   `BASELINE=none` (the 0.1.0 baseline module only loads on 7.2.9).
+   **Release gate, in order (0 + 2 spawns):** `sudo
+   scripts/mz0380-m85-unload-smoke.sh` (now also unbinds under a running
+   `arecord` - the M259 path, must say "clean" twice), then `sudo
+   BASELINE=none scripts/mz0380-m247-verify.sh` (no `!!`). OBS closed.
 3. **Suspend/resume and `.shutdown`** (M245, still untested). M247 fixed one
    resume defect statically: SET_AIC is re-sent after a card cold boot.
 4. **M232** (encoder goes silent) - not reproduced; suspect two consumers.

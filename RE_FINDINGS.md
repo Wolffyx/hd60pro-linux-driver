@@ -16197,3 +16197,20 @@ ring, and the switch that unpublishes it.
 
 The task died holding the substream lock with interrupts off, so the host
 needed a full power cycle (no PCI reset - M249). Spawns this cycle: 6.
+
+Failsafe on top of the fix: removal no longer waits for applications.
+Unregister used `snd_card_free()`, which blocks until every handle is
+closed, so an application that never closes the device (hung, or ignoring the
+disconnect) would hang unbind and rmmod just the same, without any oops. It
+now cuts `pcm->dev` under the ring lock and calls
+`snd_card_free_when_closed()`: the card is disconnected at once (open
+handles get -ENODEV) and freed with its last handle. The callbacks reach the
+device only through `pcm->dev` under that lock, so one that runs after
+removal - a close, the disconnect's own STOP - touches only the ring, which
+lives as long as the card.
+
+`scripts/mz0380-m85-unload-smoke.sh` gained a second, zero-spawn cycle that
+unbinds the card while `arecord` captures from it, and fails if unbind
+blocks for 10 s, arecord is not told, or the kernel complains. It is part
+of the release gate (NEXT_SESSION_START item 2, README "Releases and
+branches").
