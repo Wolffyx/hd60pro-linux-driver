@@ -74,10 +74,11 @@ commit or PR text.
    rubenturen streams on NixOS 6.18.44, Intel, once the module set
    `intel_iommu=on` (first Intel IOMMU run). Audio also shows up in OBS as a
    separate input. Left to do:
-   - NixOS options for the module parameters, at least `enable_audio` (e.g.
-     `hardware.mz0380.enableAudio`, written through `boot.extraModprobeConfig`).
-     The flake installs no `/etc/modprobe.d/mz0380.conf`; that is expected,
-     NixOS generates modprobe config itself.
+   - NixOS options for the module parameters: done on
+     `feat/nix-module-options` (`hardware.mz0380.enableAudio` and
+     `.moduleOptions`, written through `boot.extraModprobeConfig`); waiting on
+     rubenturen to confirm. The flake installs no `/etc/modprobe.d/mz0380.conf`;
+     that is expected, NixOS generates modprobe config itself.
    - Ping the issue when audio v1 is ready for testing (promised end of this
      week or next).
    - A release system (tags + release notes), so Nix users can pin a release
