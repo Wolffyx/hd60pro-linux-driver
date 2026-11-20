@@ -84,8 +84,23 @@ runs (`boot.kernelPackages`) and rebuilds it with every kernel change:
 ```
 
 After `nixos-rebuild switch` the module loads by itself when the card is
-present (or now, with `sudo modprobe mz0380`). Without flakes, add the package
-directly from a checkout of this repository:
+present (or now, with `sudo modprobe mz0380`).
+
+Module parameters are NixOS options too, instead of `/etc/modprobe.d`:
+
+```nix
+hardware.mz0380 = {
+  enable = true;
+  enableAudio = true;                         # enable_audio=1 (experimental)
+  moduleOptions = { raw_deliver = false; };   # any other parameter
+};
+```
+
+They take effect the next time the module loads: reboot, or
+`sudo modprobe -r mz0380 && sudo modprobe mz0380`. The card's audio is a
+separate ALSA capture device, so in OBS add it as its own audio input.
+
+Without flakes, add the package directly from a checkout of this repository:
 
 ```nix
 boot.extraModulePackages = [
