@@ -31,9 +31,9 @@
 # -----------------
 # A full probe - card handshake, request_irq (so free_irq and its DEBUG_SHIRQ
 # callback run on the way out), DMA windows, receiver bring-up - with
-# enable_video=0, so no V4L2 node appears for the desktop to open and pin the
-# module. Nothing is ever uploaded - the card runs its own flash image. No
-# STREAMON, no SET_VIC, no encoder spawn.
+# enable_video=0 enable_audio=0, so no V4L2 node or ALSA card appears for the
+# desktop to open and pin the module. Nothing is ever uploaded - the card
+# runs its own flash image. No STREAMON, no SET_VIC, no encoder spawn.
 #
 # Then a second cycle with the defaults (video node + ALSA device) that
 # unbinds the card while arecord is capturing from it - the M259 path, where a
@@ -57,12 +57,20 @@ fi
 . scripts/mz0380-build.sh
 MZKO=$(mz0380_resolve_module) || fail "build failed"
 rmmod mz0380 2>/dev/null
+# Still there: WirePlumber's hold on the ALSA control pins it. Unbind drops that.
+if lsmod | grep -qE "^mz0380"; then
+	for d in /sys/bus/pci/drivers/mz0380/0000:*; do
+		[ -e "$d" ] && echo "${d##*/}" > /sys/bus/pci/drivers/mz0380/unbind
+	done
+	sleep 1
+	rmmod mz0380 || fail "a loaded mz0380 will not unload: $(lsmod | grep '^mz0380')"
+fi
 sleep 1
 modprobe -a videodev videobuf2-v4l2 videobuf2-vmalloc v4l2-dv-timings snd-pcm
 dmesg -C
 
 echo "=== load (no V4L2 node; the IRQ is requested, which is the point) ==="
-insmod "$MZKO" enable_video=0 || fail "insmod failed"
+insmod "$MZKO" enable_video=0 enable_audio=0 || fail "insmod failed"
 
 sleep 2
 dmesg | grep -E "mz0380" | tail -3
@@ -97,7 +105,9 @@ PCI=$(ls /sys/bus/pci/drivers/mz0380/ | grep -m1 ':')
 [ -n "$PCI" ] || fail "card not bound after insmod"
 
 AREC_LOG=/tmp/mz0380-smoke-arecord.log
-arecord -q -D hw:CARD=mz0380,DEV=0 -f S16_LE -c 2 -r 48000 -t raw /dev/null \
+# -N: with no video stream the card sends no audio, and a blocking read gives
+# up with EIO after 1.1x the buffer time (~0.55 s); non-blocking keeps it open.
+arecord -N -q -D hw:CARD=mz0380,DEV=0 -f S16_LE -c 2 -r 48000 -t raw /dev/null \
 	> "$AREC_LOG" 2>&1 &
 AREC=$!
 sleep 1
