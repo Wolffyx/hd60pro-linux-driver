@@ -259,7 +259,12 @@ list:
 # Neither builds: run `make` as your user first, so nothing in the tree ends up
 # owned by root.
 #
-VERSION      = 0.2.0
+# One source for the version: MZ0380_VERSION in src/mz0380.h
+# (scripts/mz0380-version.sh sets it, and dkms.conf with it). Not in the
+# kbuild pass: that runs from the kernel tree, which has its own VERSION.
+ifeq ($(KERNELRELEASE),)
+VERSION      = $(shell sed -n 's/^\#define MZ0380_VERSION[[:space:]]*"\(.*\)"$$/\1/p' src/mz0380.h)
+endif
 MODDIR       = /lib/modules/$(KVER)/kernel/drivers/media/pci/mz0380
 MODPROBE_DIR = /etc/modprobe.d
 DKMS_SRC     = /usr/src/mz0380-$(VERSION)

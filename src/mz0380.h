@@ -34,7 +34,7 @@
 
 #include "mz0380-reg.h"
 
-#define MZ0380_VERSION			"0.2.0"
+#define MZ0380_VERSION			"0.3.0"
 
 #define MZ0380_MAXBOARDS		8
 #define MZ0380_MAX_MAPS			2

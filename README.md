@@ -17,7 +17,7 @@ budget](#the-encoder-spawn-budget) before you start experimenting.
 | Formats | `YU12` (I420), `NV12`, `YV12` uncompressed, and `H264` from the card's own encoder |
 | No source | a NO SIGNAL picture at 2 fps instead of a frozen frame or a timeout, in every format |
 | Hot-plug | unplug and replug the source mid-capture, or swap it for one at another frame rate; the stream carries on |
-| Audio | HDMI audio as an ALSA capture device - **experimental**, off by default |
+| Audio | HDMI audio as an ALSA capture device (48 kHz stereo), on by default |
 | Conformance | `v4l2-compliance` clean |
 
 Applications choose the format. `YU12` is the default; OBS should be set to
@@ -68,7 +68,7 @@ runs (`boot.kernelPackages`) and rebuilds it with every kernel change:
 # flake.nix
 {
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.mz0380.url = "github:Wolffyx/hd60pro-linux-driver";
+  inputs.mz0380.url = "github:Wolffyx/hd60pro-linux-driver";  # or .../v0.3.0 to pin a release
   inputs.mz0380.inputs.nixpkgs.follows = "nixpkgs";
 
   outputs = { nixpkgs, mz0380, ... }: {
@@ -91,7 +91,7 @@ Module parameters are NixOS options too, instead of `/etc/modprobe.d`:
 ```nix
 hardware.mz0380 = {
   enable = true;
-  enableAudio = true;                         # enable_audio=1 (experimental)
+  enableAudio = false;                        # video only (audio is on by default)
   moduleOptions = { raw_deliver = false; };   # any other parameter
 };
 ```
@@ -270,7 +270,7 @@ None are needed. `modinfo mz0380` lists them all; the ones worth knowing:
 | `post_skip` | 0 | uncompressed decimation: deliver one in `post_skip+1` frames |
 | `raw_full_range` | 0 | label uncompressed formats full-range (0-255) |
 | `dma_iova_base` | 0x100000000 | where the 4 GiB-aligned DMA windows go, if that range is taken |
-| `enable_audio` | 0 | register the experimental HDMI audio device |
+| `enable_audio` | 1 | register the HDMI audio capture device; 0 = video only |
 | `enable_video` | 1 | 0 brings the card up without a video node |
 
 Set them in `/etc/modprobe.d/mz0380.conf` (installed with commented examples).
@@ -355,7 +355,7 @@ src/mz0380-dma-stream.c   the card's encoder start/stop command sequence
 src/mz0380-dma-drain.c    H.264 and raw frame delivery
 src/mz0380-dma-raw.c      raw slot completeness checks and the copy out
 src/mz0380-no-signal.c    the NO SIGNAL picture
-src/mz0380-audio.c        ALSA capture (experimental)
+src/mz0380-audio.c        ALSA capture
 src/mz0380-proc.c         /proc files
 ```
 
@@ -376,6 +376,23 @@ lspci -nn -d 12ab:
 ```
 
 The Elgato 4K60 Pro and HD60 S are different hardware and are not supported.
+
+## Releases and branches
+
+`main` holds released code only; every tagged release (`v0.3.0`, ...) is on
+the [releases page](https://github.com/Wolffyx/hd60pro-linux-driver/releases).
+Work happens on `dev`:
+
+1. Branch from `dev`, open the pull request against `dev`.
+2. When `dev` is ready to ship, run the hardware checks on it with OBS
+   closed - `sudo scripts/mz0380-m85-unload-smoke.sh` (zero spawns, includes
+   removing the card under a running audio capture) and `sudo
+   BASELINE=none scripts/mz0380-m247-verify.sh` - then bump the version on `dev`
+   (`scripts/mz0380-version.sh X.Y.Z`, which sets `src/mz0380.h` and
+   `dkms.conf`) and open a pull request from `dev` into `main`.
+3. Merging it publishes `vX.Y.Z` with release notes
+   (`.github/workflows/release.yml`). The pull request already fails if the
+   module does not build or that version was released before.
 
 ## License
 

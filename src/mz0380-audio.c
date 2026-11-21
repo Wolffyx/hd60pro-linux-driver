@@ -16,7 +16,8 @@
  *  while something is (or, with the persistent pipeline, has been) capturing
  *  video: a capture opened on its own waits for the first slot.
  *
- *  Opt-in with enable_audio=1 until verified on hardware.
+ *  On by default since M257 verified it on hardware; enable_audio=0 turns it
+ *  off.
  */
 
 #include "mz0380.h"
@@ -31,6 +32,11 @@
 struct mz0380_pcm {
 	struct snd_card *card;
 	struct snd_pcm *pcm;
+	/*
+	 * Cleared under @lock by unregister, which no longer waits for open
+	 * captures: a callback may run after the device is gone, so callbacks
+	 * reach it only through here, under the lock (M259).
+	 */
 	struct mz0380_dev *dev;
 	/* Protects everything below against the push from the drain worker. */
 	spinlock_t lock;
@@ -42,10 +48,21 @@ struct mz0380_pcm {
 	unsigned int period_pos;	/* bytes since the last period      */
 };
 
+/*
+ * The ring is the card's private data, so it lives exactly as long as the
+ * card. dev->snd_pcm is only how the drain worker finds it, and unregister
+ * clears it before disconnecting the card, which stops a running capture
+ * through .trigger - so the callbacks must never go through dev->snd_pcm
+ * (M259).
+ */
+static struct mz0380_pcm *to_pcm(struct snd_pcm_substream *ss)
+{
+	return ss->pcm->card->private_data;
+}
+
 static int mz0380_pcm_open(struct snd_pcm_substream *ss)
 {
-	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 	struct snd_pcm_runtime *rt = ss->runtime;
 	unsigned int rate = mz0380_aic_freq;
 	unsigned int chans = mz0380_aic_channels;
@@ -58,7 +75,7 @@ static int mz0380_pcm_open(struct snd_pcm_substream *ss)
 	 */
 	if (mz0380_aic_bits != 16 || chans < 1 || chans > 2 ||
 	    rate < 8000 || rate > 192000) {
-		dev_warn(&dev->pci->dev,
+		dev_warn(pcm->card->dev,
 			 "audio: SET_AIC is %u ch x %u bit at %u Hz; only 1-2 ch x 16 bit is offered\n",
 			 chans, mz0380_aic_bits, rate);
 		return -EINVAL;
@@ -85,30 +102,30 @@ static int mz0380_pcm_open(struct snd_pcm_substream *ss)
 	spin_lock_irqsave(&pcm->lock, flags);
 	pcm->substream = ss;
 	pcm->running = false;
+	if (pcm->dev)
+		pcm->dev->audio_alsa_opens++;
 	spin_unlock_irqrestore(&pcm->lock, flags);
-	dev->audio_alsa_opens++;
 	return 0;
 }
 
 static int mz0380_pcm_close(struct snd_pcm_substream *ss)
 {
-	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 	unsigned long flags;
 
 	spin_lock_irqsave(&pcm->lock, flags);
 	pcm->running = false;
 	pcm->substream = NULL;
+	if (pcm->dev)
+		pcm->dev->audio_alsa_closes++;
 	spin_unlock_irqrestore(&pcm->lock, flags);
-	dev->audio_alsa_closes++;
 	return 0;
 }
 
 static int mz0380_pcm_hw_params(struct snd_pcm_substream *ss,
 				struct snd_pcm_hw_params *p)
 {
-	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 	unsigned long flags;
 
 	spin_lock_irqsave(&pcm->lock, flags);
@@ -120,22 +137,21 @@ static int mz0380_pcm_hw_params(struct snd_pcm_substream *ss,
 
 static int mz0380_pcm_prepare(struct snd_pcm_substream *ss)
 {
-	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 	unsigned long flags;
 
 	spin_lock_irqsave(&pcm->lock, flags);
 	pcm->hw_ptr = 0;
 	pcm->period_pos = 0;
+	if (pcm->dev)
+		pcm->dev->audio_alsa_prepares++;
 	spin_unlock_irqrestore(&pcm->lock, flags);
-	dev->audio_alsa_prepares++;
 	return 0;
 }
 
 static int mz0380_pcm_trigger(struct snd_pcm_substream *ss, int cmd)
 {
-	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 
 	/* Called with the stream lock held, so no irqsave needed on top. */
 	switch (cmd) {
@@ -143,15 +159,17 @@ static int mz0380_pcm_trigger(struct snd_pcm_substream *ss, int cmd)
 	case SNDRV_PCM_TRIGGER_RESUME:
 		spin_lock(&pcm->lock);
 		pcm->running = true;
+		if (pcm->dev)
+			pcm->dev->audio_alsa_starts++;
 		spin_unlock(&pcm->lock);
-		dev->audio_alsa_starts++;
 		return 0;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 		spin_lock(&pcm->lock);
 		pcm->running = false;
+		if (pcm->dev)
+			pcm->dev->audio_alsa_stops++;
 		spin_unlock(&pcm->lock);
-		dev->audio_alsa_stops++;
 		return 0;
 	}
 	return -EINVAL;
@@ -159,8 +177,7 @@ static int mz0380_pcm_trigger(struct snd_pcm_substream *ss, int cmd)
 
 static snd_pcm_uframes_t mz0380_pcm_pointer(struct snd_pcm_substream *ss)
 {
-	struct mz0380_dev *dev = snd_pcm_substream_chip(ss);
-	struct mz0380_pcm *pcm = dev->snd_pcm;
+	struct mz0380_pcm *pcm = to_pcm(ss);
 
 	return bytes_to_frames(ss->runtime, READ_ONCE(pcm->hw_ptr));
 }
@@ -306,9 +323,20 @@ void mz0380_audio_unregister(struct mz0380_dev *dev)
 	if (dev->irq_requested)
 		flush_work(&dev->audio_work);
 
-	/* Waits for every open handle to close before it returns. */
+	/*
+	 * Disconnect now and free the card when its last handle closes: removal
+	 * must not wait on an application that never closes the device, which
+	 * would hang unbind and rmmod (M259). Open handles see -ENODEV from here
+	 * on, and their callbacks run without the device: cut pcm->dev first.
+	 */
 	if (dev->snd_card) {
-		snd_card_free(dev->snd_card);
+		struct mz0380_pcm *pcm = dev->snd_card->private_data;
+		unsigned long flags;
+
+		spin_lock_irqsave(&pcm->lock, flags);
+		pcm->dev = NULL;
+		spin_unlock_irqrestore(&pcm->lock, flags);
+		snd_card_free_when_closed(dev->snd_card);
 		dev->snd_card = NULL;
 	}
 	dev->audio_registered = false;
