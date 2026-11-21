@@ -16110,7 +16110,7 @@ that arrived before arecord opened.
 | byte order | little-endian is correct: roughness 0.22-0.26 as delivered vs 1.36-1.41 swapped |
 | rate | 192000 bytes/s = 48 kHz x 2 ch x 16 bit, as SET_AIC asks |
 | stereo | independent channels: L == R on only 29.7% of samples with a stereo video (99.6% with a near-mono one), side signal up to ~900 RMS |
-| left/right order | **not proven** - no hard-panned source was captured |
+| left/right order | **not proven** here - no hard-panned source was captured (proven correct in M260) |
 
 One run was believed to play the left/right tone file and showed none of its
 440/660 Hz tones under any reading of the bytes (16-bit stereo, 32-bit mono
@@ -16214,3 +16214,23 @@ unbinds the card while `arecord` captures from it, and fails if unbind
 blocks for 10 s, arecord is not told, or the kernel complains. It is part
 of the release gate (NEXT_SESSION_START item 2, README "Releases and
 branches").
+
+## M260 (hardware, 2026-11-21): HDMI audio left/right order is correct
+
+The last open audio question from M257. `sudo SECS=120
+scripts/mz0380-m246-audio-test.sh` on v0.3.0 (kernel 7.3.4), recording a
+~2 min left/right test video played over HDMI. The per-second table
+alternates in ~10 s blocks, and the quiet channel reads 1 against ~8000 on
+the loud one (second 5: `1 / 7852`, second 15: `7907 / 1`), so there is no
+crosstalk. The operator played the WAV back on headphones: the side the video
+named came out of that ear. ch0 is left, ch1 is right, as M257 assumed from
+the HDMI/I2S convention. No driver change.
+
+Two 20 s runs before it showed L and R level every second (most lopsided
+100 ms window 1.48:1) with channel correlation 0.85: the source was ordinary
+stereo, not a panned test. A real panned test leaves one side near silent, so
+a ratio near 1 means the source, not the card. 7037 audio slots, 0 empty, 0
+overrun, no IOMMU faults; spawns this power cycle: 5.
+
+With this, every audio property M257 listed is verified: content, byte order,
+48 kHz rate, independent stereo, and left/right order.

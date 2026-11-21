@@ -71,9 +71,9 @@ publishes the tag - README "Releases and branches").
    the idle read path is shifted before trusting idle 0x48 reads.
 2. **Audio: M257 verified it with sound** (phone over HDMI, 5 runs): content,
    byte order (little-endian), 48 kHz rate and independent stereo all
-   correct, no driver change. Only left/right order is unproven - needs one
-   run of `sudo SECS=20 scripts/mz0380-m246-audio-test.sh` with a
-   hard-panned source (the per-second table must alternate).
+   correct, no driver change. **M260 proved left/right order** (2026-11-21,
+   120 s left/right test video: ch0 = left, no crosstalk). Audio has no open
+   questions left.
    `enable_audio` defaults to 1 since **v0.3.0, released 2026-11-21**. Its
    gate passed on 7.3.4 after a power cycle: the M85 smoke test clean twice
    (including the M259 unbind under a running `arecord`) and M247 with
