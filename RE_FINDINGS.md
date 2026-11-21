@@ -16166,3 +16166,51 @@ Consequences:
   the only reason to power-cycle.
 - Unverified on hardware: which of the two outcomes (sleep or exit) the
   card's kernel gives. It does not matter for the host.
+
+## M259 (hardware, 2026-11-20): kernel oops unbinding with an audio capture open
+
+The first release-gate run for audio-on-by-default (`BASELINE=none
+scripts/mz0380-m247-verify.sh`, kernel 7.3.4) oopsed in its first unload.
+OBS had the card's ALSA device open ("HD60 Pro HDMI Stereo") and running:
+
+    BUG: kernel NULL pointer dereference, address: 0000000000000018
+    RIP: _raw_spin_lock+0x18
+     mz0380_pcm_trigger+0x66
+     snd_pcm_stop
+     snd_pcm_dev_disconnect / snd_card_disconnect / snd_card_free
+     mz0380_audio_unregister+0x47
+     mz0380_finidev / pci_device_remove / unbind_store
+    note: mz0380-live.sh exited with irqs disabled, preempt_count 2
+
+`mz0380_audio_unregister()` clears `dev->snd_pcm` first (so the drain worker
+stops pushing) and then calls `snd_card_free()`. That disconnects the card
+and stops a running capture through `.trigger`, and every PCM callback
+looked its ring up through `dev->snd_pcm` - NULL by then. 0x18 is `lock`
+in `struct mz0380_pcm`. The bug was there since M246, but it needed audio
+enabled AND a capture open during removal. With audio on by default, every
+OBS user hits it on unload.
+
+Fix: the callbacks take the ring from the card's private data
+(`ss->pcm->card->private_data`), which lives as long as the card.
+`dev->snd_pcm` stays what it was meant to be: how the drain worker finds the
+ring, and the switch that unpublishes it.
+
+The task died holding the substream lock with interrupts off, so the host
+needed a full power cycle (no PCI reset - M249). Spawns this cycle: 6.
+
+Failsafe on top of the fix: removal no longer waits for applications.
+Unregister used `snd_card_free()`, which blocks until every handle is
+closed, so an application that never closes the device (hung, or ignoring the
+disconnect) would hang unbind and rmmod just the same, without any oops. It
+now cuts `pcm->dev` under the ring lock and calls
+`snd_card_free_when_closed()`: the card is disconnected at once (open
+handles get -ENODEV) and freed with its last handle. The callbacks reach the
+device only through `pcm->dev` under that lock, so one that runs after
+removal - a close, the disconnect's own STOP - touches only the ring, which
+lives as long as the card.
+
+`scripts/mz0380-m85-unload-smoke.sh` gained a second, zero-spawn cycle that
+unbinds the card while `arecord` captures from it, and fails if unbind
+blocks for 10 s, arecord is not told, or the kernel complains. It is part
+of the release gate (NEXT_SESSION_START item 2, README "Releases and
+branches").
