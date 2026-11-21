@@ -56,7 +56,11 @@ next capture.
 
 Any hardware run: OBS closed (it grabs the node at load and spends spawns).
 `sudo scripts/mz0380-m247-verify.sh` is the regression check (3 spawns;
-`fourcc` and `coldtrace` modes are zero-spawn). No Claude attribution in
+`BASELINE=none` skips the 0.1.0 baseline, which only loads on 7.2.9, for 2;
+`fourcc` and `coldtrace` modes are zero-spawn). **Release gate** before any
+`dev` -> `main` PR, after a full power cycle, OBS closed: `sudo
+scripts/mz0380-m85-unload-smoke.sh` ("clean" twice, 0 spawns), then `sudo
+BASELINE=none scripts/mz0380-m247-verify.sh` (no `!!`). No Claude attribution in
 commit or PR text. Branch from `dev` and PR into `dev`; a `dev` -> `main` PR
 is a release (bump first with `scripts/mz0380-version.sh X.Y.Z`; merging
 publishes the tag - README "Releases and branches").
@@ -70,17 +74,12 @@ publishes the tag - README "Releases and branches").
    correct, no driver change. Only left/right order is unproven - needs one
    run of `sudo SECS=20 scripts/mz0380-m246-audio-test.sh` with a
    hard-panned source (the per-second table must alternate).
-   `enable_audio` now defaults to 1 (on `dev`, for v0.3.0). **Release gate:**
-   run `sudo scripts/mz0380-m247-verify.sh` once with that default before
-   the `dev` -> `main` PR - the video regression check has only ever run with
-   the video-only SET_AIC layout. If it fails, flip the default back.
-   First attempt (M259) oopsed on unload with OBS's audio capture open -
-   fixed on `fix/release-gate`; re-run after a full power cycle, with
-   `BASELINE=none` (the 0.1.0 baseline module only loads on 7.2.9).
-   **Release gate, in order (0 + 2 spawns):** `sudo
-   scripts/mz0380-m85-unload-smoke.sh` (now also unbinds under a running
-   `arecord` - the M259 path, must say "clean" twice), then `sudo
-   BASELINE=none scripts/mz0380-m247-verify.sh` (no `!!`). OBS closed.
+   `enable_audio` defaults to 1 since **v0.3.0, released 2026-11-21**. Its
+   gate passed on 7.3.4 after a power cycle: the M85 smoke test clean twice
+   (including the M259 unbind under a running `arecord`) and M247 with
+   `BASELINE=none` with no `!!` (compliance 48/48, 300 raw frames, 0 dropped).
+   The smoke test's `arecord` runs with `-N`: with no video stream the card
+   sends no audio, and a blocking read times out with EIO after ~0.55 s.
 3. **Suspend/resume and `.shutdown`** (M245, still untested). M247 fixed one
    resume defect statically: SET_AIC is re-sent after a card cold boot.
 4. **M232** (encoder goes silent) - not reproduced; suspect two consumers.
@@ -89,16 +88,13 @@ publishes the tag - README "Releases and branches").
    rubenturen streams on NixOS 6.18.44, Intel, once the module set
    `intel_iommu=on` (first Intel IOMMU run). Audio also shows up in OBS as a
    separate input. Left to do:
-   - NixOS options for the module parameters: done on
-     `feat/nix-module-options` (`hardware.mz0380.enableAudio` and
-     `.moduleOptions`, written through `boot.extraModprobeConfig`); waiting on
-     rubenturen to confirm. The flake installs no `/etc/modprobe.d/mz0380.conf`;
-     that is expected, NixOS generates modprobe config itself.
-   - Ping the issue when audio v1 is ready for testing (promised end of this
-     week or next).
-   - Release system: done (`dev` branch, `.github/workflows/release.yml`,
-     tags `vX.Y.Z`). First release v0.3.0 once the gate in item 2 passes;
-     then tell the issue Nix users can pin `.../v0.3.0`.
+   - NixOS options for the module parameters: released in v0.3.0
+     (`hardware.mz0380.enableAudio` and `.moduleOptions`, written through
+     `boot.extraModprobeConfig`); waiting on rubenturen to confirm. The flake
+     installs no `/etc/modprobe.d/mz0380.conf`; that is expected, NixOS
+     generates modprobe config itself.
+   - Issue told on 2026-11-21 that v0.3.0 is out, audio is on by default, and
+     it can be pinned with `github:Wolffyx/hd60pro-linux-driver/v0.3.0`.
 
 ## Running it
 
